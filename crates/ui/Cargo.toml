@@ -1,0 +1,42 @@
+[package]
+name = "ui"
+description = "oxio frontend: kernel assembly from config, stream rendering, REPL."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+oxio-core = { path = "../oxio-core" }
+providers = { path = "../providers" }
+config = { path = "../config" }
+auth = { path = "../auth" }  # local path dep (auth seam)
+tools = { path = "../tools" }  # local path dep (built-in tools)
+safety = { path = "../safety" }  # local path dep (permission gate + loop guard)
+context = { path = "../context" }  # local path dep (layered context compaction)
+session = { path = "../session" }  # local path dep (multi-turn session history)
+memory = { path = "../memory" }  # local path dep (durable memory store + injector)
+mcp = { path = "../mcp", optional = true }  # MCP client; optional so footprint-sensitive builds can drop it
+lsp = { path = "../lsp", optional = true }  # LSP diagnostics client; optional, footprint-gated
+async-trait.workspace = true
+serde_json.workspace = true  # tool input schema/args for the ask_user_question tool
+base64 = "=0.22.1"  # encode local images to base64 data URLs for view_image (vision). exact pin
+anyhow.workspace = true
+# reedline: legacy line-REPL fallback.
+reedline.workspace = true
+# ratatui TUI + crossterm (async event-stream): the CLI frontend.
+# versions aligned: ratatui 0.29, crossterm 0.28.
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+# tokio: signal (Ctrl-C) + rt + process (hooks) + time (TUI frame ticks) + macros (select)
+tokio = { workspace = true, features = ["signal", "rt", "process", "time", "macros"] }
+futures.workspace = true  # StreamExt for the crossterm async event stream in the TUI
+tokio-util = "0.7"  # CancellationToken to interrupt a turn from the TUI (same type as Ctx.cancel); already in lock via oxio-core
+
+# features only (no new deps): gate the already-approved optional mcp/lsp deps
+[features]
+# feature flag only (no new dep): the ratatui TUI is now the default frontend
+default = ["mcp", "lsp", "tui"]
+mcp = ["dep:mcp"]
+lsp = ["dep:lsp"]
+# The ratatui TUI frontend (the real CLI UX). `--no-default-features` falls back to the line REPL.
+tui = []

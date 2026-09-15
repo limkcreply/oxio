@@ -1,0 +1,19 @@
+[package]
+name = "oxio-core"
+description = "Frozen microkernel contract for the oxio agentic CLI."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio-util = "=0.7.12"  # cancellation token; single named dep, exact pin
+tokio = { workspace = true, features = ["time"] }  # select!/timeout for kernel-enforced cancel+deadline
+
+[dev-dependencies]
+async-trait.workspace = true
+tokio.workspace = true

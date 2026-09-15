@@ -1,0 +1,24 @@
+[package]
+name = "mcp"
+description = "MCP client: connect to configured MCP servers over stdio and expose their tools as oxio Tools (rmcp-backed)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+oxio-core = { path = "../oxio-core" }
+async-trait.workspace = true
+serde_json.workspace = true
+rmcp = { version = "=3.2.0", features = [
+    "client",
+    "transport-child-process",              # stdio: a locally-spawned server
+    "transport-streamable-http-client-reqwest",  # remote: an MCP server over the network
+    "auth",                                 # OAuth 2.0 client (discovery, dynamic registration, refresh) for authed remote MCPs
+] }  # official MCP Rust SDK
+tokio = { workspace = true, features = ["process"] }
+http = "1"  # HeaderMap/HeaderName/HeaderValue for MCP auth headers
+serde = { workspace = true }  # derive for the persisted OAuth token; workspace-pinned serde 1, already in the graph
+url = "2"  # parse the OAuth loopback callback query
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process"] }

@@ -1,0 +1,15 @@
+[package]
+name = "session"
+description = "Persistent multi-turn conversation history as a bolt-on Transformer (PreTurn inject + PostTurn capture). Makes the REPL remember prior turns; prerequisite for manual /compact + memory."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+oxio-core = { path = "../oxio-core" }
+async-trait.workspace = true
+serde_json.workspace = true  # transcript persistence: one JSON Message per line for --continue lossless resume
+serde = { workspace = true }  # derive SessionMeta/Record (tagged JSONL: head meta + timestamped messages) for --resume picker
+
+[dev-dependencies]
+tokio.workspace = true

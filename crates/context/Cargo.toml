@@ -1,0 +1,14 @@
+[package]
+name = "context"
+description = "Layered token-budget context compaction as a PreModel transformer on the frozen core."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+oxio-core = { path = "../oxio-core" }
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+serde_json.workspace = true  # dev-only: build a tool-call arg Value in a token-estimate test

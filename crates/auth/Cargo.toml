@@ -1,0 +1,13 @@
+[package]
+name = "auth"
+description = "oxio auth: a thin Auth seam + strategies. API-key/none now; official vendor sign-in delegated later."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

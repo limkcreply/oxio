@@ -1,0 +1,26 @@
+[package]
+name = "oxio"
+description = "Local-first agentic CLI (binary)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "oxio"
+path = "src/main.rs"
+
+# default features enable the mcp + lsp clients (drop with --no-default-features).
+[features]
+default = ["mcp", "lsp"]
+mcp = ["ui/mcp"]
+lsp = ["ui/lsp"]
+
+[dependencies]
+clap.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+toml.workspace = true
+config = { path = "../config" }
+ui = { path = "../ui" }
+session = { path = "../session" }  # `oxio session list/rm` manages saved transcripts
+oxio-core = { path = "../oxio-core" }

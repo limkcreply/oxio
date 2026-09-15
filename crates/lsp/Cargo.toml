@@ -1,0 +1,16 @@
+[package]
+name = "lsp"
+description = "Minimal LSP client: spawn a configured language server, open a file, collect diagnostics. Hand-rolled Content-Length JSON-RPC (no clean client SDK exists)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+oxio-core = { path = "../oxio-core" }
+async-trait.workspace = true
+serde_json.workspace = true
+# tokio process + async IO + rt + time for the LSP stdio client (Content-Length framing, bounded wait)
+tokio = { workspace = true, features = ["process", "io-util", "rt", "macros", "time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["process", "io-util", "rt-multi-thread", "macros", "time"] }

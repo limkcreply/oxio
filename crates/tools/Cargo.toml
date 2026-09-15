@@ -1,0 +1,25 @@
+[package]
+name = "tools"
+description = "oxio built-in tools. Read-only first (read_file, list_dir); write/bash await safety."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+oxio-core = { path = "../oxio-core" }
+memory = { path = "../memory" }  # local path dep: single source of the memory paths (project + global) for the memory tool
+async-trait.workspace = true
+serde_json.workspace = true
+ignore = "=0.4.23"  # ripgrep's gitignore walker; powers list_dir/grep/glob. exact pin
+globset = "=0.4.16"  # ripgrep's glob matcher for the glob tool. exact pin
+grep-searcher = "=0.1.17"  # ripgrep's line-oriented searcher (binary-detect/encoding) for grep. exact pin
+grep-regex = "=0.1.14"  # ripgrep's RegexMatcher for the grep tool. exact pin
+tokio = { workspace = true, features = ["process", "rt"] }  # child-process exec (bash, kill_on_drop) + rt (background tasks: spawn/AbortHandle)
+reqwest = { version = "=0.12.9", default-features = false, features = ["rustls-tls"] }  # HTTP GET for web_fetch; rustls (matches providers pin)
+pdf-extract = "=0.12.0"  # local PDF text-layer extraction (read_file/doc intake). exact pin
+calamine = "=0.36.1"  # xlsx/xls/ods reader for spreadsheet text extraction. exact pin
+zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }  # docx = zip; read word/document.xml. deflate only, trims zstd/bzip2. exact pin
+base64 = "0.23.1"  # decode gpt-image/local b64_json PNG for generate_image
+
+[dev-dependencies]
+tokio.workspace = true

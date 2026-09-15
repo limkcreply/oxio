@@ -1,0 +1,12 @@
+[package]
+name = "config"
+description = "oxio configuration: TOML schema, load/save, XDG paths."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+toml.workspace = true
+dirs.workspace = true
+anyhow.workspace = true
