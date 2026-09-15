@@ -918,12 +918,21 @@ pub async fn build_kernel(
     // Context ceiling precedence: profile override → per-MODEL `[models.<id>]`
     // (context is a model property, not the machine's) → provider-level →
     // safe default.
-    let context_window = profile
+    let mut context_window = profile
         .and_then(|p| p.context_ceiling)
         .map(|c| c as usize)
         .or_else(|| cfg.models.get(&model).and_then(|m| m.context_window))
-        .or(ppc.context_window)
-        .unwrap_or(32_768);
+        .or(ppc.context_window);
+    // Nothing configured it: ask the endpoint what the model's window actually is. Local
+    // servers report it (vLLM `max_model_len`, etc.); closed cloud vendors usually don't,
+    // so this stays None there and drops to the default. Reads only what the server says.
+    if context_window.is_none() {
+        if let Some(base) = ppc.base_url.as_deref() {
+            context_window = providers::model_max_context(base, &model).await;
+        }
+    }
+    // Still unknown (e.g. a cloud vendor that doesn't advertise it): leave it `None` -
+    // no fabricated ceiling. The user sets it with `/model ctx <n>` for that model.
     let compactor = Arc::new(context::Compactor::new(
         provider.clone(),
         model.clone(),
@@ -1903,11 +1912,18 @@ mod tests {
 
     #[test]
     fn ctx_status_formats_percent_and_k_tokens() {
-        assert_eq!(ctx_status(13000, 32000), "40% · 13k/32k");
-        assert_eq!(ctx_status(0, 32000), "0% · 0/32k");
-        assert_eq!(ctx_status(500, 4000), "12% · 500/4k");
-        // No divide-by-zero on an unset window.
-        assert_eq!(ctx_status(100, 0), "0% · 100/0");
+        assert_eq!(ctx_status(13000, Some(32000)), "40% · 13k/32k");
+        assert_eq!(ctx_status(0, Some(32000)), "0% · 0/32k");
+        assert_eq!(ctx_status(500, Some(4000)), "12% · 500/4k");
+        // Unknown window: no fabricated ceiling or percentage, and no divide-by-zero.
+        assert_eq!(
+            ctx_status(100, None),
+            "100 used · window unset (/model ctx <n>)"
+        );
+        assert_eq!(
+            ctx_status(100, Some(0)),
+            "100 used · window unset (/model ctx <n>)"
+        );
     }
 
     #[test]
@@ -2044,11 +2060,16 @@ fn fmt_tokens(n: usize) -> String {
     }
 }
 
-/// Context-used status: `41% · 13k/32k`. Shown after each turn so the user always
-/// sees how full the window is (and why a `/compact` might be coming).
-fn ctx_status(used: usize, window: usize) -> String {
-    let pct = used.saturating_mul(100).checked_div(window).unwrap_or(0);
-    format!("{pct}% · {}/{}", fmt_tokens(used), fmt_tokens(window))
+/// Context-used status: `41% · 13k/32k` when the window is known; when it is unknown we
+/// show the used count and a hint to set it, never a fabricated ceiling or percentage.
+fn ctx_status(used: usize, window: Option<usize>) -> String {
+    match window {
+        Some(w) if w > 0 => {
+            let pct = used.saturating_mul(100) / w;
+            format!("{pct}% · {}/{}", fmt_tokens(used), fmt_tokens(w))
+        }
+        _ => format!("{} used · window unset (/model ctx <n>)", fmt_tokens(used)),
+    }
 }
 
 /// Whether to emit ANSI color: off when `NO_COLOR` is set or stdout is not a TTY
@@ -2598,9 +2619,12 @@ fn onboard_cloud() -> anyhow::Result<Option<Config>> {
 
     if !api_key.is_empty() {
         // Persist the key to <config>/.env (0600) - loaded at startup, kept out of config.toml.
+        let var = format!("OXIO_{}_API_KEY", key_name.to_uppercase());
+        // Apply the key to THIS process immediately - startup already ran the .env load,
+        // so without this the freshly-onboarded provider would error until a restart.
+        std::env::set_var(&var, &api_key);
         if let Some(dir) = config::config_path().parent() {
             let env_path = dir.join(".env");
-            let var = format!("OXIO_{}_API_KEY", key_name.to_uppercase());
             let mut body = std::fs::read_to_string(&env_path).unwrap_or_default();
             if !body.ends_with('\n') && !body.is_empty() {
                 body.push('\n');

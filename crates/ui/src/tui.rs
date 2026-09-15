@@ -803,7 +803,7 @@ struct App {
     cost_label: &'static str,
     pricing: BTreeMap<String, RateCfg>,
     ctx_used: usize,
-    ctx_window: usize,
+    ctx_window: Option<usize>,
     total_in: u64,
     total_out: u64,
     // session-wide stats for the exit summary
@@ -2382,14 +2382,32 @@ fn draw(f: &mut ratatui::Frame, app: &App) {
 const DEFAULT_STATUSLINE: &str = "{time} · {model} · {ctx_bar} {ctx_pct} · {cost}";
 
 fn status_line(app: &App) -> Line<'static> {
-    let pct = app
-        .ctx_used
-        .saturating_mul(100)
-        .checked_div(app.ctx_window)
-        .unwrap_or(0);
     let bar_w = 12usize;
-    let filled = (pct * bar_w / 100).min(bar_w);
+    // Window may be unknown (None): show a fresh bar, "?" percent, and used-only count -
+    // never a fabricated ceiling or percentage.
+    let known = app.ctx_window.filter(|w| *w > 0);
+    let pct = known
+        .map(|w| app.ctx_used.saturating_mul(100) / w)
+        .unwrap_or(0);
+    let pct_str = if known.is_some() {
+        format!("{pct}%")
+    } else {
+        "?".to_string()
+    };
+    let filled = if known.is_some() {
+        (pct * bar_w / 100).min(bar_w)
+    } else {
+        0
+    };
     let bar = format!("[{}{}]", "=".repeat(filled), " ".repeat(bar_w - filled));
+    let ctx_num = match known {
+        Some(w) => format!("{}/{}", fmt_k(app.ctx_used as u64), fmt_k(w as u64)),
+        None => format!("{} tok", fmt_k(app.ctx_used as u64)),
+    };
+    let window_str = match app.ctx_window {
+        Some(w) => fmt_k(w as u64),
+        None => "unset".to_string(),
+    };
     // {cost} is a ready segment: "saved $x" when priced, else the token count.
     let cost = match cost_usd(app.total_in, app.total_out, &app.pricing, &app.model) {
         Some(v) => format!("{} ${v:.4}", app.cost_label),
@@ -2419,16 +2437,12 @@ fn status_line(app: &App) -> Line<'static> {
             sep(),
             Span::styled(bar.clone(), Style::default().fg(Color::Green)),
             Span::raw(" "),
-            Span::styled(format!("{pct}%"), Style::default().fg(Color::Cyan)),
+            Span::styled(pct_str.clone(), Style::default().fg(Color::Cyan)),
             sep(),
             Span::styled(
                 // Context USED / window - same numerator as the bar/pct above, so they
                 // agree. (total_out is output-only and belongs in {cost}, not here.)
-                format!(
-                    "{}/{}",
-                    fmt_k(app.ctx_used as u64),
-                    fmt_k(app.ctx_window as u64)
-                ),
+                ctx_num.clone(),
                 Style::default().fg(Color::Red),
             ),
             sep(),
@@ -2449,7 +2463,11 @@ fn status_line(app: &App) -> Line<'static> {
         ));
         return Line::from(spans);
     }
-    let remaining = 100usize.saturating_sub(pct);
+    let remaining = if known.is_some() {
+        format!("{}%", 100usize.saturating_sub(pct))
+    } else {
+        "?".to_string()
+    };
     let reasoning = if app.reasoning.is_empty() {
         "-"
     } else {
@@ -2470,9 +2488,9 @@ fn status_line(app: &App) -> Line<'static> {
         .replace("{host}", &app.host) // hostname
         .replace("{session}", &app.session_id) // thread-id
         .replace("{version}", env!("CARGO_PKG_VERSION")) // version
-        .replace("{ctx_pct}", &format!("{pct}%")) // context-used
-        .replace("{ctx_remaining}", &format!("{remaining}%")) // context-remaining
-        .replace("{ctx_window}", &fmt_k(app.ctx_window as u64)) // context-window
+        .replace("{ctx_pct}", &pct_str) // context-used
+        .replace("{ctx_remaining}", &remaining) // context-remaining
+        .replace("{ctx_window}", &window_str) // context-window
         .replace("{ctx_bar}", &bar)
         .replace("{in}", &fmt_k(app.total_in)) // input-tokens
         .replace("{out}", &fmt_k(app.total_out)) // output-tokens

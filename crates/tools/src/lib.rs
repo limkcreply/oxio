@@ -1661,38 +1661,57 @@ async fn exec_foreground(mut cmd: tokio::process::Command, who: &str, cue: Empty
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // Foreground safety net: a command that never returns (a server, a hung process) would
+    // otherwise block the turn forever. Cap the wait; on timeout the child is dropped and
+    // kill_on_drop kills it, freeing the agent with a pointer to `background:true`.
+    let secs = std::env::var("OXIO_BASH_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(120);
     match cmd.spawn() {
         Err(e) => ToolOutput::error(format!("{who}: failed to start: {e}")),
-        Ok(child) => match child.wait_with_output().await {
-            Err(e) => ToolOutput::error(format!("{who}: {e}")),
-            Ok(out) => {
-                let mut body = format_exec(out.status.code(), &out.stdout, &out.stderr);
-                let empty_out = out.stdout.iter().all(u8::is_ascii_whitespace);
-                match cue {
-                    // A searcher with empty stdout → the neutral widen-cue. (grep exits 1 on
-                    // no-match, find exits 0 - so key on empty STDOUT, not the exit code.)
-                    EmptyCue::Search if empty_out => body.push_str(&widen_cue("the searched path")),
-                    // A resource-existence probe that came back NEGATIVE - non-zero exit, or
-                    // truly-empty output - gets the neutral "look wider before concluding
-                    // absent" cue. A probe that succeeds (exit 0 with output, incl. version
-                    // text on stderr) is a real answer → no cue.
-                    EmptyCue::Probe
-                        if out.status.code() != Some(0)
-                            || (empty_out && out.stderr.iter().all(u8::is_ascii_whitespace)) =>
-                    {
-                        body.push_str(&probe_cue());
+        Ok(child) => {
+            match tokio::time::timeout(Duration::from_secs(secs), child.wait_with_output()).await {
+                Err(_) => ToolOutput::error(format!(
+                "{who}: no result after {secs}s, so it was stopped. For a long-running process \
+                 (dev server, watch, tail -f) run it with background:true and read it with \
+                 task_output - don't block the turn waiting on something that won't return."
+            )),
+                Ok(Err(e)) => ToolOutput::error(format!("{who}: {e}")),
+                Ok(Ok(out)) => {
+                    let mut body = format_exec(out.status.code(), &out.stdout, &out.stderr);
+                    let empty_out = out.stdout.iter().all(u8::is_ascii_whitespace);
+                    match cue {
+                        // A searcher with empty stdout → the neutral widen-cue. (grep exits 1 on
+                        // no-match, find exits 0 - so key on empty STDOUT, not the exit code.)
+                        EmptyCue::Search if empty_out => {
+                            body.push_str(&widen_cue("the searched path"))
+                        }
+                        // A resource-existence probe that came back NEGATIVE - non-zero exit, or
+                        // truly-empty output - gets the neutral "look wider before concluding
+                        // absent" cue. A probe that succeeds (exit 0 with output, incl. version
+                        // text on stderr) is a real answer → no cue.
+                        EmptyCue::Probe
+                            if out.status.code() != Some(0)
+                                || (empty_out
+                                    && out.stderr.iter().all(u8::is_ascii_whitespace)) =>
+                        {
+                            body.push_str(&probe_cue());
+                        }
+                        // A cloud/remote log query with ZERO entries - empty stdout OR a
+                        // "no results" JSON marker (aws/gcloud return `{"events": []}`, not
+                        // empty output) - gets the neutral "0 logs != 0 events" cue.
+                        EmptyCue::CloudLog
+                            if empty_out || looks_like_no_log_results(&out.stdout) =>
+                        {
+                            body.push_str(&cloud_log_cue());
+                        }
+                        _ => {}
                     }
-                    // A cloud/remote log query with ZERO entries - empty stdout OR a
-                    // "no results" JSON marker (aws/gcloud return `{"events": []}`, not
-                    // empty output) - gets the neutral "0 logs != 0 events" cue.
-                    EmptyCue::CloudLog if empty_out || looks_like_no_log_results(&out.stdout) => {
-                        body.push_str(&cloud_log_cue());
-                    }
-                    _ => {}
+                    ToolOutput::ok(cap(body))
                 }
-                ToolOutput::ok(cap(body))
             }
-        },
+        }
     }
 }
 

@@ -97,7 +97,10 @@ pub fn shed_tool_outputs(messages: &mut [Message], keep_recent: usize) -> usize 
 pub struct Compactor {
     provider: Arc<dyn Provider>,
     model: String,
-    context_window: usize,
+    /// `None` = the model's window is unknown (not configured, not advertised by the
+    /// endpoint). We do NOT invent a number: auto-compaction is disabled and the UI shows
+    /// the window as unset rather than a misleading default.
+    context_window: Option<usize>,
     keep_recent: usize,
     failures: Mutex<usize>,
 }
@@ -106,23 +109,25 @@ impl Compactor {
     pub fn new(
         provider: Arc<dyn Provider>,
         model: impl Into<String>,
-        context_window: usize,
+        context_window: Option<usize>,
     ) -> Self {
         Compactor {
             provider,
             model: model.into(),
-            context_window: context_window.max(4096),
+            context_window: context_window.map(|w| w.max(4096)),
             keep_recent: 6,
             failures: Mutex::new(0),
         }
     }
 
-    fn soft_limit(&self) -> usize {
-        self.context_window * 9 / 10 // 90%
+    /// The 90% auto-compaction trigger, or `None` when the window is unknown (never fire).
+    fn soft_limit(&self) -> Option<usize> {
+        self.context_window.map(|w| w * 9 / 10)
     }
 
     /// The model's context window, so the UI can show ctx-used against budget.
-    pub fn context_window(&self) -> usize {
+    /// `None` when unknown - the UI shows "unset" instead of a fabricated ceiling.
+    pub fn context_window(&self) -> Option<usize> {
         self.context_window
     }
 
@@ -246,7 +251,11 @@ impl Transformer for Compactor {
         if hook != Hook::PreModel {
             return Ok(());
         }
-        if estimate_tokens(&state.messages) < self.soft_limit() {
+        // Unknown window = never auto-compact (we won't guess a ceiling and trigger against it).
+        let Some(soft) = self.soft_limit() else {
+            return Ok(());
+        };
+        if estimate_tokens(&state.messages) < soft {
             return Ok(());
         }
         // Circuit breaker: after repeated failures, stop trying (let the turn
@@ -260,7 +269,7 @@ impl Transformer for Compactor {
         // Tier 1: mechanical shed first - keep granular history if it's enough.
         shed_tool_outputs(&mut state.messages, self.keep_recent);
         let after_shed = estimate_tokens(&state.messages);
-        if after_shed < self.soft_limit() {
+        if after_shed < soft {
             state.notice(
                 NoticeLevel::Progress,
                 compaction_notice("shed old tool output", before, after_shed),
@@ -344,7 +353,7 @@ mod tests {
         let provider = Arc::new(StubSummarizer {
             calls: AtomicUsize::new(0),
         });
-        let c = Compactor::new(provider.clone(), "m", 8192);
+        let c = Compactor::new(provider.clone(), "m", Some(8192));
         let mut state = TurnState {
             input: String::new(),
             model: "m".into(),
@@ -395,7 +404,7 @@ mod tests {
         let provider = Arc::new(StubSummarizer {
             calls: AtomicUsize::new(0),
         });
-        let c = Compactor::new(provider, "m", 4096); // soft limit ≈ 3686 tok
+        let c = Compactor::new(provider, "m", Some(4096)); // soft limit ≈ 3686 tok
         let big = "x ".repeat(1500); // ~3000 chars ≈ 750 tok each
         let msgs: Vec<Message> = (0..12).map(|_| user(&big)).collect(); // ~9000 tok, over budget
         let mut state = TurnState {

@@ -14,6 +14,8 @@ mod toolcalls;
 pub use anthropic::AnthropicAdapter;
 pub use chain::ChainProvider;
 pub use chat_completions::{ChatCompletionsAdapter, Sampling};
-pub use discovery::{list_models, scan_local, LocalEndpoint, KNOWN_LOCAL_ENDPOINTS};
+pub use discovery::{
+    list_models, model_max_context, scan_local, LocalEndpoint, KNOWN_LOCAL_ENDPOINTS,
+};
 pub use responses::ResponsesAdapter;
 pub use swap::SwappableProvider;

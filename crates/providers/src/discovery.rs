@@ -46,6 +46,40 @@ pub async fn list_models(base_url: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Best-effort probe of a model's context window from the provider's `/v1/models`.
+/// Local servers advertise it (vLLM `max_model_len`, others `context_length`); most
+/// closed cloud vendors do not, so this returns `None` there and the caller falls back
+/// to config or a default. Never model-specific - it only reads what the server reports.
+pub async fn model_max_context(base_url: &str, model: &str) -> Option<usize> {
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(1500))
+        .build()
+        .ok()?;
+    let resp = client.get(&url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let v: serde_json::Value = resp.json().await.ok()?;
+    let arr = v.get("data").and_then(|d| d.as_array())?;
+    let entry = arr
+        .iter()
+        .find(|m| m.get("id").and_then(|x| x.as_str()) == Some(model))?;
+    for key in [
+        "max_model_len",
+        "context_length",
+        "max_context_length",
+        "context_window",
+    ] {
+        if let Some(n) = entry.get(key).and_then(|x| x.as_u64()) {
+            if n > 0 {
+                return Some(n as usize);
+            }
+        }
+    }
+    None
+}
+
 /// The well-known local OpenAI-compatible servers oxio probes on first run.
 /// Convenience ONLY - it covers the famous defaults so a zero-config user is found
 /// without typing. It deliberately does NOT try to find custom-port or remote servers:
