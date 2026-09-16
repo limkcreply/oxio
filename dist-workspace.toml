@@ -9,6 +9,8 @@ cargo-dist-version = "0.32.0"
 ci = "github"
 # The installers to generate for each app
 installers = ["shell"]
+# Ship the self-updater so `oxio-update` checks for and installs newer releases.
+install-updater = true
 # Target platforms (Rust target-triple syntax). Unix only: oxio uses the seatbelt sandbox and 0600 file modes.
 targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
 # Where to host releases

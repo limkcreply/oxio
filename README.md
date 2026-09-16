@@ -32,11 +32,16 @@ history stay on your machine.
 
 ## Installation
 
-Install the latest release with one command. It downloads a prebuilt binary, so no Rust
-toolchain is needed:
+Install the latest release with one command (prebuilt binary, no Rust toolchain):
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/limkcreply/oxio/releases/latest/download/oxio-installer.sh | sh
+curl -LsSf https://limkc.com/oxio | sh
+```
+
+Or install straight from GitHub Releases:
+
+```bash
+curl -LsSf https://github.com/limkcreply/oxio/releases/latest/download/oxio-installer.sh | sh
 ```
 
 This puts the `oxio` binary on your PATH. Run your own model endpoint separately (for

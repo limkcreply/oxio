@@ -1055,7 +1055,13 @@ pub async fn run_tui(
         {
             app.push(l.to_string(), accent);
         }
-        app.push("  github.com/limkcreply/oxio".to_string(), App::dim());
+        app.push(
+            format!(
+                "  oxio {} · github.com/limkcreply/oxio",
+                env!("CARGO_PKG_VERSION")
+            ),
+            App::dim(),
+        );
         app.push("".to_string(), Style::default());
         let info = Style::default(); // terminal default fg - adapts to light/dark, no bold
         app.push(format!("  model  {}", app.model), info);
