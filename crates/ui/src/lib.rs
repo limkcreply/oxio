@@ -50,9 +50,49 @@ use safety::{
 };
 use serde_json::{json, Value};
 
-/// Default system prompt. Baseline is OpenAI's open-source Codex CLI system prompt
-/// (Apache-2.0), adapted for oxio.
+/// Default system prompt, loaded from `default_system_prompt.md`.
 const DEFAULT_SYSTEM_PROMPT: &str = include_str!("default_system_prompt.md");
+
+/// Stock sub-agents shipped with oxio: named read-only specialists the main model can
+/// delegate to (`agent_explore` / `agent_research` / `agent_review`), so a fresh install
+/// has a roster to pick from instead of only anonymous parallel tasks. Each carries a role
+/// prompt with its methodology fused in. A user `[agents.<name>]` of the same name overrides
+/// the stock one.
+fn default_agents() -> Vec<(String, config::AgentCfg)> {
+    let mk = |desc: &str, role: &str, skill: &str| config::AgentCfg {
+        description: Some(desc.to_string()),
+        tools: Some(vec!["read".to_string()]),
+        permission: Some("read_only".to_string()),
+        prompt: Some(format!("{role}\n\n{skill}")),
+        ..Default::default()
+    };
+    vec![
+        (
+            "explore".to_string(),
+            mk(
+                "Explore the codebase: find where things live, how a feature is wired, which files and symbols are involved. Read-only.",
+                include_str!("agents/explore.role.md"),
+                include_str!("agents/explore.skill.md"),
+            ),
+        ),
+        (
+            "research".to_string(),
+            mk(
+                "Research external information: docs, APIs, libraries, current facts, with sources. Read-only.",
+                include_str!("agents/research.role.md"),
+                include_str!("agents/research.skill.md"),
+            ),
+        ),
+        (
+            "review".to_string(),
+            mk(
+                "Review code for defects (bugs, risks, missing tests) with file and line references. Read-only, reports only.",
+                include_str!("agents/review.role.md"),
+                include_str!("agents/review.skill.md"),
+            ),
+        ),
+    ]
+}
 
 /// Markers wrapping an image path in the submitted turn text. The composer emits
 /// `⟦img:/abs/path⟧` for each dropped/pasted image; [`ImageExpander`] rewrites these
@@ -1035,7 +1075,14 @@ context in `task`."
     // Resolve the session's skills once - shared by agent skill-binding (below) and the
     // `skill` tool (further down).
     let session_skills = resolve_skills(cfg);
-    for (aname, acfg) in &cfg.agents {
+    // Roster = stock agents (explore/research/review) first, then user `[agents.<name>]`,
+    // so a user entry of the same name overrides the stock one.
+    let mut agent_roster: std::collections::BTreeMap<String, config::AgentCfg> =
+        default_agents().into_iter().collect();
+    for (k, v) in &cfg.agents {
+        agent_roster.insert(k.clone(), v.clone());
+    }
+    for (aname, acfg) in &agent_roster {
         let (aprov, amodel): (Arc<dyn Provider>, String) = match acfg.provider.as_deref() {
             Some(pn) if pn != pname => match cfg.providers.get(pn) {
                 Some(pc) => (
@@ -1909,6 +1956,26 @@ impl Tool for Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_agents_are_named_read_only_specialists() {
+        let roster = default_agents();
+        let names: Vec<&str> = roster.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["explore", "research", "review"]);
+        for (name, cfg) in &roster {
+            assert_eq!(
+                cfg.tools,
+                Some(vec!["read".to_string()]),
+                "{name} not read-only"
+            );
+            assert_eq!(cfg.permission.as_deref(), Some("read_only"), "{name} perm");
+            assert!(
+                cfg.prompt.as_deref().unwrap_or("").len() > 100,
+                "{name} prompt should carry role + fused skill"
+            );
+            assert!(cfg.description.is_some(), "{name} needs a description");
+        }
+    }
 
     #[test]
     fn ctx_status_formats_percent_and_k_tokens() {
