@@ -24,7 +24,7 @@ use oxio_core::{
 /// The model drafts in an `<analysis>` scratchpad (improves quality) then writes the real
 /// summary in `<summary>`; [`format_summary`] strips the scratchpad before injection.
 const SUMMARIZATION_PROMPT: &str = "You are compacting a long coding session so another model can \
-resume it seamlessly. Create a detailed summary of the conversation so far, paying close attention to \
+resume it. Create a detailed summary of the conversation so far, paying close attention to \
 the user's explicit requests and your previous actions, capturing technical details, code patterns, and \
 decisions essential for continuing without losing context.
 

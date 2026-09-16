@@ -4,7 +4,7 @@ members = ["crates/*"]
 
 [workspace.package]
 edition = "2021"
-version = "0.1.1"
+version = "0.1.2"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
@@ -21,3 +21,8 @@ toml = "0.8"
 dirs = "5"
 clap = { version = "4", features = ["derive"] }
 reedline = "0.38"  # commodity line editor (history/editing) for the REPL
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

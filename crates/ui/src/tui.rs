@@ -185,7 +185,7 @@ async fn vision_route(
 }
 
 /// Set the terminal tab/window title (OSC 0). Out-of-band from the ratatui grid so
-/// it is safe to emit mid-session; lets the tab show working/idle like the vendors.
+/// it is safe to emit mid-session; lets the tab show working/idle.
 fn set_terminal_title(title: &str) {
     use std::io::Write;
     let mut out = std::io::stdout();
@@ -575,7 +575,6 @@ fn connect_cmd(rest: &str, current: &str) -> (Vec<String>, ConnectAction) {
         // fixed when the kernel builds.
         Some("ctx") => {
             let arg = parts.next();
-            // The model currently pinned on the active machine.
             let model = cfg.providers.get(current).and_then(|pc| pc.model.clone()).unwrap_or_default();
             if model.is_empty() {
                 return (vec![format!("connect: active machine '{current}' has no model set - /model <model> first")], ConnectAction::None);
@@ -723,8 +722,7 @@ fn theme() -> Style {
 }
 
 // User-prompt highlight - a SUBTLE terracotta wash, so the user's turn is distinct from
-// the AI's plain output (the pattern all three vendors use: highlight the user turn, leave
-// the AI plain). Terminals have no real alpha, so "terracotta transparent ~80%" is
+// the AI's plain output. Terminals have no real alpha, so "terracotta transparent ~80%" is
 // approximated as the accent #7A3028 blended ~20% over a dark base → a low, warm wash
 // rather than an opaque pastel. The bar sets BOTH colours (a bg is the one place the
 // "lean on the terminal default fg" rule can't hold): the dark wash + warm-cream text pair
@@ -787,7 +785,6 @@ struct App {
     // long pastes collapsed to a `[pasted #N +M lines]` chip: (marker, full text). The
     // composer + transcript show the chip; the marker expands to full text at submit.
     pending_pastes: Vec<(String, String)>,
-    // status
     model: String,
     reasoning: String,
     provider: String,
@@ -1009,8 +1006,8 @@ pub async fn run_tui(
         quit: false,
     };
     // Resume vs fresh: on --continue/--resume with restored history, REPLAY the prior
-    // transcript into the visible history so it reads as if never broken (vendor parity),
-    // and skip the big landing. Fresh start → branded logo + info block.
+    // transcript into the visible history so it reads as if never broken, and skip the
+    // big landing. Fresh start → branded logo + info block.
     let restored = session.snapshot();
     if !restored.is_empty() {
         use oxio_core::Role;
@@ -1058,6 +1055,7 @@ pub async fn run_tui(
         {
             app.push(l.to_string(), accent);
         }
+        app.push("  github.com/limkcreply/oxio".to_string(), App::dim());
         app.push("".to_string(), Style::default());
         let info = Style::default(); // terminal default fg - adapts to light/dark, no bold
         app.push(format!("  model  {}", app.model), info);
@@ -1084,8 +1082,7 @@ pub async fn run_tui(
 
     // Terminal setup. INLINE viewport (NOT alt-screen): the conversation is written to
     // the terminal's NATIVE scrollback via insert_before, so native wheel/two-finger
-    // scroll AND text selection work - the model all three vendors use (Ink <Static> /
-    // ratatui insert_before). Only the composer block lives in the drawn viewport.
+    // scroll AND text selection work. Only the composer block lives in the drawn viewport.
     let mut stdout = std::io::stdout();
     enable_raw_mode()?;
     crossterm::execute!(stdout, EnableBracketedPaste, EnableFocusChange)?;
@@ -1423,7 +1420,7 @@ async fn event_loop(
                     if app.working.is_none() {
                         // A dropped/pasted image path is attached to the next turn, not
                         // inserted as text - this also keeps a leading-'/' path out of
-                        // the slash-command parser (the vendors all convert at paste time).
+                        // the slash-command parser.
                         if let Some(path) = dropped_image_path(s) {
                             let name = std::path::Path::new(&path)
                                 .file_name()
@@ -1885,7 +1882,7 @@ async fn event_loop(
                                         }
                                     }
                                     "help" | "h" => {
-                                        // Per-command education (vendor pattern): each command with a
+                                        // Per-command education: each command with a
                                         // one-line "what it delivers". Commands that take arguments print
                                         // their own usage when run with no/invalid args.
                                         for line in [
@@ -1908,6 +1905,7 @@ async fn event_loop(
                                             "keys: Alt+Enter newline · Up/Down history · Ctrl-A/E/U/K/W edit · Esc interrupt · Tab accept suggestion",
                                             App::dim(),
                                         );
+                                        app.push("source & issues: github.com/limkcreply/oxio", App::dim());
                                     }
                                     "undo" => {
                                         let m = snapshots.undo().unwrap_or_else(|| "(nothing to undo)".into());

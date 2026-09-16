@@ -32,6 +32,18 @@ history stay on your machine.
 
 ## Installation
 
+Install the latest release with one command. It downloads a prebuilt binary, so no Rust
+toolchain is needed:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/limkcreply/oxio/releases/latest/download/oxio-installer.sh | sh
+```
+
+This puts the `oxio` binary on your PATH. Run your own model endpoint separately (for
+example Ollama on `localhost:11434`).
+
+### From source
+
 Requires a Rust toolchain.
 
 ```bash
@@ -39,9 +51,6 @@ git clone https://github.com/limkcreply/oxio
 cd oxio
 cargo install --path crates/oxio
 ```
-
-This installs the `oxio` binary to `~/.cargo/bin`. Run your own model endpoint separately
-(for example Ollama on `localhost:11434`).
 
 ## First run
 

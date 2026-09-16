@@ -2262,11 +2262,10 @@ in_progress. Returns the current checklist."
 }
 
 // --- web_search : a configured search BACKEND, never a bypass ---
-// The vendors' web_search is provider-side (Anthropic/Google run it server-side),
-// so there is no client-side impl to port. oxio is local-primary, so it brings
-// its own backend, selected by env like our provider API keys. If unconfigured,
-// the tool DEMANDS setup (loud directive), never silently no-ops. Brave (API key)
-// and SearXNG (self-host URL) ship first; more backends slot behind this seam.
+// oxio is local-primary, so web_search is its own backend, selected by env like the
+// provider API keys. If unconfigured, the tool DEMANDS setup (loud directive), never
+// silently no-ops. Brave (API key) and SearXNG (self-host URL) ship first; more backends
+// slot behind this seam.
 
 enum SearchBackend {
     Brave { key: String },
