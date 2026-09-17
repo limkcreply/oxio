@@ -63,6 +63,8 @@ enum Cmd {
         #[command(subcommand)]
         action: ProfileCmd,
     },
+    /// Update oxio to the latest release
+    Update,
 }
 
 #[derive(Subcommand)]
@@ -214,6 +216,21 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Some(Cmd::Login { vendor }) => ui::mcp_login(&cfg, &vendor).await?,
+        Some(Cmd::Update) => {
+            // Delegate to the cargo-dist self-updater installed alongside oxio.
+            let updater = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("oxio-update")))
+                .filter(|p| p.exists())
+                .unwrap_or_else(|| "oxio-update".into());
+            match std::process::Command::new(&updater).status() {
+                Ok(s) if s.success() => {}
+                Ok(s) => std::process::exit(s.code().unwrap_or(1)),
+                Err(_) => anyhow::bail!(
+                    "self-updater not installed - reinstall via the one-line installer at limkc.com/oxio"
+                ),
+            }
+        }
         None => {
             if cli.prompt.is_empty() {
                 // Onboarding fires ONLY on a genuinely empty config (no providers at all) -
