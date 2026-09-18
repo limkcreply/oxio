@@ -899,7 +899,7 @@ fn append_prompt_history(text: &str) {
 pub async fn run_tui(
     cfg: &Config,
     continue_session: bool,
-    resume_pick: bool,
+    resume: Option<String>,
 ) -> anyhow::Result<()> {
     // Approval mode is config-driven. Interactive mode uses a TUI modal (not
     // stdin), routed to the event loop over this channel.
@@ -930,16 +930,7 @@ pub async fn run_tui(
     // runtime; whether it actually GENERATES is gated by `app.suggest` at turn-end.
     let suggest_provider = crate::primary_provider(cfg).await;
 
-    // Resume (same as the line REPL).
-    if resume_pick {
-        if let Some(p) = crate::pick_session() {
-            session.continue_from(&p);
-        }
-    } else if continue_session {
-        if let Some(p) = session::latest_session() {
-            session.continue_from(&p);
-        }
-    }
+    crate::apply_resume(&session, continue_session, &resume);
 
     let (pname, pc) = cfg.primary().ok_or_else(|| {
         anyhow::anyhow!("no primary provider configured - see `oxio config show`")

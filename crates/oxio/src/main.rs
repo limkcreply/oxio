@@ -22,9 +22,9 @@ struct Cli {
     /// Resume the most recent session, reloading its full transcript losslessly.
     #[arg(long = "continue")]
     continue_session: bool,
-    /// Pick a past session to resume from a list (full lossless restore).
-    #[arg(long = "resume")]
-    resume: bool,
+    /// Resume a past session. Bare picks from a list, or `--resume <id>` loads one by id.
+    #[arg(long = "resume", num_args = 0..=1, default_missing_value = "")]
+    resume: Option<String>,
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }

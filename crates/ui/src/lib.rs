@@ -25,15 +25,43 @@ pub use tui::run_tui;
 pub async fn run_interactive(
     cfg: &Config,
     continue_session: bool,
-    resume_pick: bool,
+    resume: Option<String>,
 ) -> anyhow::Result<()> {
     #[cfg(feature = "tui")]
     {
-        run_tui(cfg, continue_session, resume_pick).await
+        run_tui(cfg, continue_session, resume).await
     }
     #[cfg(not(feature = "tui"))]
     {
-        repl(cfg, continue_session, resume_pick).await
+        repl(cfg, continue_session, resume).await
+    }
+}
+
+/// Apply the resume selector to the freshly-built session before the loop starts.
+/// `--resume <id>` resolves the id through the machine index (so it works from any project)
+/// and loads that session's context into this session, logging to the new file so the
+/// original is untouched. Bare `--resume` picks one to continue; `--continue` reopens the
+/// latest of this folder.
+fn apply_resume(session: &session::SessionStore, continue_session: bool, resume: &Option<String>) {
+    match resume {
+        Some(id) if !id.is_empty() => match session::session_path_by_id(id) {
+            Some(p) => session.replace(session::load_transcript(&p)),
+            None => eprintln!(
+                "no session '{id}' in the index ({})",
+                session::session_index_path().display()
+            ),
+        },
+        Some(_) => {
+            if let Some(p) = pick_session() {
+                session.continue_from(&p);
+            }
+        }
+        None if continue_session => {
+            if let Some(p) = session::latest_session() {
+                session.continue_from(&p);
+            }
+        }
+        None => {}
     }
 }
 
@@ -2733,6 +2761,7 @@ fn pick_session() -> Option<PathBuf> {
     }
     println!("past sessions:");
     for (i, s) in sessions.iter().enumerate().take(20) {
+        let id = s.meta.as_ref().map(|m| m.id.as_str()).unwrap_or("?");
         let model = s.meta.as_ref().map(|m| m.model.as_str()).unwrap_or("?");
         let preview = if s.preview.is_empty() {
             "(empty)"
@@ -2740,8 +2769,9 @@ fn pick_session() -> Option<PathBuf> {
             &s.preview
         };
         println!(
-            "  [{}] {} msgs · {} · {}",
+            "  [{}] {} · {} msgs · {} · {}",
             i + 1,
+            id,
             s.message_count,
             model,
             preview
@@ -2786,25 +2816,17 @@ fn load_custom_command(name: &str, full: &str) -> Option<String> {
 
 /// Interactive REPL: reedline line editing + history, streaming answers, and
 /// Ctrl-C cancels the in-flight turn (Ctrl-C/Ctrl-D at the prompt exits).
-pub async fn repl(cfg: &Config, continue_session: bool, resume_pick: bool) -> anyhow::Result<()> {
+pub async fn repl(
+    cfg: &Config,
+    continue_session: bool,
+    resume: Option<String>,
+) -> anyhow::Result<()> {
     use reedline::{DefaultPrompt, DefaultPromptSegment, Reedline, Signal};
 
     let (kernel, session, compactor, snapshots, _ctl) =
         build_kernel(cfg, Arc::new(StdinApprover), None, None).await?;
-    // `--continue` reloads the latest session; `--resume` shows a picker. Both
-    // restore the chosen transcript in full (lossless) and keep appending to it.
-    let mut resumed = 0usize;
-    let resume_path = if resume_pick {
-        pick_session()
-    } else if continue_session {
-        session::latest_session()
-    } else {
-        None
-    };
-    if let Some(path) = resume_path {
-        session.continue_from(&path);
-        resumed = session.len();
-    }
+    apply_resume(&session, continue_session, &resume);
+    let resumed = session.len();
     let (pname, pc) = cfg.primary().ok_or_else(|| {
         anyhow::anyhow!("no primary provider configured - see `oxio config show`")
     })?;

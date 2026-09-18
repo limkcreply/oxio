@@ -76,6 +76,7 @@ impl SessionStore {
     /// Auto-log every turn's new messages verbatim to `path` (created on first
     /// append). `meta` is written as the head line before the first message.
     pub fn new_logging(path: PathBuf, meta: SessionMeta) -> Arc<Self> {
+        index_session(&path);
         let store = SessionStore::default();
         *store.transcript.lock().unwrap() = Some(path);
         *store.meta.lock().unwrap() = Some(meta);
@@ -179,6 +180,67 @@ pub fn new_session_path() -> PathBuf {
         .map(|d| d.as_millis())
         .unwrap_or(0);
     sessions_dir().join(format!("sess-{ts}.jsonl"))
+}
+
+/// Machine-level index mapping a session id (the file stem) to its transcript path, so a
+/// session can be found by id from any project. `OXIO_SESSION_INDEX` overrides the default.
+pub fn session_index_path() -> PathBuf {
+    std::env::var_os("OXIO_SESSION_INDEX")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_default();
+            home.join(".oxio").join("session-index")
+        })
+}
+
+/// Record `id -> path` in the machine index (best-effort, append-only). Called on session
+/// creation so `--resume <id>` can locate a session created in any project.
+pub fn index_session(path: &Path) {
+    append_index(&session_index_path(), &absolutize(path));
+}
+
+/// Resolve `path` against the current directory when relative. The index is
+/// machine-wide and read from any cwd, so a relative `.oxio/sessions/...` would
+/// fail `exists()` outside its own project folder. cwd here is the session's
+/// project at creation time.
+fn absolutize(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|d| d.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
+}
+
+fn append_index(idx: &Path, path: &Path) {
+    let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+        return;
+    };
+    if let Some(dir) = idx.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(idx) {
+        let _ = writeln!(f, "{id}\t{}", path.display());
+    }
+}
+
+/// Resolve a session id to its transcript path via the machine index. Returns the path only
+/// if the id is indexed and the file still exists; newest matching entry wins.
+pub fn session_path_by_id(id: &str) -> Option<PathBuf> {
+    lookup_index(&session_index_path(), id)
+}
+
+fn lookup_index(idx: &Path, id: &str) -> Option<PathBuf> {
+    let body = std::fs::read_to_string(idx).ok()?;
+    body.lines()
+        .rev()
+        .filter_map(|l| l.split_once('\t'))
+        .find(|(k, _)| *k == id)
+        .map(|(_, p)| PathBuf::from(p))
+        .filter(|p| p.exists())
 }
 
 /// The most recently modified session transcript, if any (for `--continue`).
@@ -293,11 +355,15 @@ impl Transformer for SessionStore {
                     .filter(|m| m.role != Role::System)
                     .cloned()
                     .collect();
-                // Append this turn's records verbatim: from the last user message
-                // (this turn's prompt) to the end (its assistant/tool outputs).
-                // Position-based, so mid-turn compaction cannot drop records - the
-                // transcript stays the full lossless conversation for `--continue`.
-                let start = hist.iter().rposition(|m| m.role == Role::User).unwrap_or(0);
+                // Fresh transcript: persist the whole history (including any resumed or
+                // seeded context) so the file is self-contained. Established one: append
+                // only this turn's tail (from its last user message), position-based so
+                // mid-turn compaction cannot drop records.
+                let start = if *self.meta_written.lock().unwrap() {
+                    hist.iter().rposition(|m| m.role == Role::User).unwrap_or(0)
+                } else {
+                    0
+                };
                 self.append_records(&hist[start..]);
                 *self.history.lock().unwrap() = hist;
             }
@@ -367,6 +433,8 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("t.jsonl");
         let _ = std::fs::remove_file(&path);
+        // Keep new_logging's index write off the real machine index.
+        std::env::set_var("OXIO_SESSION_INDEX", dir.join("idx"));
         let meta = SessionMeta {
             id: "id".into(),
             cwd: ".".into(),
@@ -406,5 +474,36 @@ mod tests {
         assert_eq!(resumed.len(), 4, "resume restores the full session");
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn session_index_write_then_resolve() {
+        let tag = now_ms();
+        let sess = std::env::temp_dir().join(format!("sess-{tag}.jsonl"));
+        std::fs::write(&sess, "x").unwrap();
+        let idx = std::env::temp_dir().join(format!("oxio-idx-{tag}"));
+        append_index(&idx, &sess);
+        let id = sess.file_stem().unwrap().to_str().unwrap();
+        assert_eq!(
+            lookup_index(&idx, id),
+            Some(sess.clone()),
+            "id resolves to its path"
+        );
+        assert_eq!(lookup_index(&idx, "sess-absent"), None);
+        let _ = std::fs::remove_file(&sess);
+        let _ = std::fs::remove_file(&idx);
+    }
+
+    #[test]
+    fn absolutize_makes_relative_paths_absolute() {
+        // The production path: sessions_dir() is relative, so an unresolved
+        // relative entry would break cross-project resume.
+        assert!(absolutize(Path::new(".oxio/sessions/sess-1.jsonl")).is_absolute());
+        let abs = std::env::temp_dir().join("sess-2.jsonl");
+        assert_eq!(
+            absolutize(&abs),
+            abs,
+            "absolute paths pass through unchanged"
+        );
     }
 }
