@@ -296,15 +296,22 @@ pub async fn load_server(
     } else {
         let args = cfg.args.clone();
         let envs = cfg.env.clone();
-        let transport = TokioChildProcess::new(Command::new(&cfg.command).configure(|c| {
-            for a in &args {
-                c.arg(a);
-            }
-            for (k, v) in &envs {
-                c.env(k, v);
-            }
-        }))
-        .map_err(|e| e.to_string())?;
+        // stdout is the JSON-RPC transport; stderr is the server's own logging.
+        // rmcp's `new()` forces child stderr to `inherit`, so a chatty or crashing
+        // server (a startup banner, a warning, an EPIPE dump) bleeds into our terminal
+        // and corrupts the TUI. The builder is the only seam that lets us null it.
+        let (transport, _stderr) =
+            TokioChildProcess::builder(Command::new(&cfg.command).configure(|c| {
+                for a in &args {
+                    c.arg(a);
+                }
+                for (k, v) in &envs {
+                    c.env(k, v);
+                }
+            }))
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| e.to_string())?;
         OxioClient::new(name, on_change.clone(), elicit.clone())
             .serve(transport)
             .await
@@ -320,7 +327,6 @@ pub async fn load_server(
     // same `discover_proxies` the list_changed handler uses - one code path, no drift.
     let peer = service.peer().clone();
     let tools = discover_proxies(&peer, name).await?;
-    eprintln!("mcp {name}: {} tools/resources/prompts", tools.len());
     service_anchor()
         .lock()
         .expect("service anchor")
