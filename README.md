@@ -18,6 +18,7 @@ history stay on your machine.
 - Full TUI: streaming output, status line, write-permission prompts, session resume, arrow-key connect picker
 - Tools that work on a text-only model: file read/write, patch editing, search, shell (OS-sandboxed on macOS), document text extraction (PDF/DOCX/XLSX), image input routed to a vision provider
 - MCP client and configurable named sub-agents
+- VS Code companion: send the editor selection as context, approve file changes in a native diff
 
 ## Supported providers
 
@@ -119,6 +120,22 @@ Secrets never go in the config file. Cloud API keys are read from the environmen
 
 Optional sections: `[providers.*]`, `[profiles.*]`, `[models.*]`, `[mcp.*]`, `[agents.*]`,
 `[lsp.*]`, `[skills.*]`, `[hooks]`, `[pricing.*]`, and a `statusline` template.
+
+## VS Code
+
+oxio ships a companion extension. Run oxio in VS Code's integrated terminal and it offers to
+install it on the first run, then asks you to reload the window. The extension is bundled in
+the binary, so nothing is downloaded. Installing it needs the `code` command on your PATH.
+
+With the extension active:
+
+- Text selected in the editor rides along with your next prompt, shown as a
+  `Selected 12 lines from src/main.rs` chip.
+- A file change opens as a native VS Code diff. Accept it with `cmd+enter` or reject it with
+  `escape`, or answer the `y/N` prompt in the terminal instead. Whichever you answer first wins.
+
+The extension talks to oxio over a loopback MCP server bound to `127.0.0.1`, and serves the
+current selection and the diff decision to oxio. It exposes nothing else.
 
 ## Project instructions
 

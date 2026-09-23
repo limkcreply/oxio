@@ -15,3 +15,5 @@ install-updater = true
 targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
 # Where to host releases
 hosting = "github"
+# Build the VS Code companion before the binary, which embeds it. The vsix is not committed.
+github-build-setup = "build-setup.yml"

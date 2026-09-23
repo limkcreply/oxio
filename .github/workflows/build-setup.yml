@@ -1,0 +1,9 @@
+- name: Install Node
+  uses: actions/setup-node@v4
+  with:
+    node-version: "20"
+- name: Package the VS Code companion
+  run: |
+    cd editors/vscode
+    npm ci
+    npx --yes @vscode/vsce package -o oxio.vsix
