@@ -1,7 +1,5 @@
 /target
 .oxio/
 .DS_Store
-
-# Images excluded by default; README/display media lives in assets/
 *.png
 !assets/*.png

@@ -58,6 +58,119 @@ fn service_anchor() -> &'static Mutex<Vec<RunningService<RoleClient, OxioClient>
     A.get_or_init(|| Mutex::new(Vec::new()))
 }
 
+/// Latest IDE context (open files + active selection) an editor extension pushed over the
+/// `ide/contextUpdate` notification. Process-global so the submit path reads it without a
+/// channel threaded through the connect stack.
+fn ide_context_slot() -> &'static Mutex<Option<Value>> {
+    static C: OnceLock<Mutex<Option<Value>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(None))
+}
+
+/// The most recent `ide/contextUpdate` params, or `None` when no editor is connected.
+pub fn ide_context() -> Option<Value> {
+    ide_context_slot().lock().ok().and_then(|g| g.clone())
+}
+
+/// The editor server's peer, held so oxio can call its `openDiff` tool for edit approval.
+fn ide_peer_slot() -> &'static Mutex<Option<Peer<RoleClient>>> {
+    static P: OnceLock<Mutex<Option<Peer<RoleClient>>>> = OnceLock::new();
+    P.get_or_init(|| Mutex::new(None))
+}
+
+/// The connected editor extension's version (from the handshake), for `/mcp` and the status line.
+fn ide_version_slot() -> &'static Mutex<Option<String>> {
+    static V: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    V.get_or_init(|| Mutex::new(None))
+}
+
+/// The LIVE editor extension version if one is connected, else `None`. The authoritative "which
+/// build is running" - a window reload can lag the installed version, and this reflects the reload.
+pub fn ide_version() -> Option<String> {
+    ide_version_slot().lock().ok().and_then(|g| g.clone())
+}
+
+/// Connect to the editor's IDE MCP server: hold its peer (for `openDiff`) and keep the service
+/// alive so `ide/contextUpdate` notifications flow. The server's tools are NOT registered as
+/// model tools - oxio calls `openDiff` itself from the approval seam.
+pub async fn connect_ide(url: &str) -> std::result::Result<Option<String>, String> {
+    let config = StreamableHttpClientTransportConfig::with_uri(url.to_string());
+    let transport = StreamableHttpClientTransport::from_config(config);
+    let service = OxioClient::new("ide", None, None)
+        .serve(transport)
+        .await
+        .map_err(|e| e.to_string())?;
+    // The editor extension's own version, from the initialize handshake - so the UI can show which
+    // build is LIVE (a window reload may lag the installed version). `None` if the server omits it.
+    let version = service
+        .peer_info()
+        .and_then(|i| i.server_info.as_ref().map(|s| s.version.to_string()))
+        .filter(|v| !v.is_empty());
+    if let Ok(mut slot) = ide_peer_slot().lock() {
+        *slot = Some(service.peer().clone());
+    }
+    if let Ok(mut v) = ide_version_slot().lock() {
+        *v = version.clone();
+    }
+    service_anchor()
+        .lock()
+        .expect("service anchor")
+        .push(service);
+    Ok(version)
+}
+
+/// Ask the editor to open a diff for `file` with `new_content` and wait for the user's decision.
+/// Returns `Ok(true)` on accept, `Ok(false)` on reject. `Err` when no editor is connected or the
+/// call fails - the caller then falls back to its own approval path.
+pub async fn ide_open_diff(file: &str, new_content: &str) -> std::result::Result<bool, String> {
+    let peer = ide_peer_slot()
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .ok_or_else(|| "no editor connected".to_string())?;
+    let mut args = Map::new();
+    args.insert("filePath".into(), Value::String(file.to_string()));
+    args.insert("newContent".into(), Value::String(new_content.to_string()));
+    let res = peer
+        .call_tool(CallToolRequestParams::new("openDiff").with_arguments(args))
+        .await
+        .map_err(|e| e.to_string())?;
+    // The editor reports the decision as a structured `accepted` bool in the tool result.
+    let accepted = res
+        .structured_content
+        .as_ref()
+        .and_then(|v| v.get("accepted"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Ok(accepted)
+}
+
+/// Close the editor's open diff without a decision - used when the user answered the write in the
+/// CLI y/N instead of the editor, so the now-moot diff does not linger. Best-effort: no editor, no
+/// open diff, or a failed call are all silently fine (nothing to dismiss).
+pub async fn ide_close_diff() {
+    let Some(peer) = ide_peer_slot().lock().ok().and_then(|g| g.clone()) else {
+        return;
+    };
+    let _ = peer
+        .call_tool(CallToolRequestParams::new("closeDiff").with_arguments(Map::new()))
+        .await;
+}
+
+/// Pull the current editor selection via the `getSelection` tool. Returns the `selection` value
+/// (`{file, startLine, endLine, text}` or null), or `None` when no editor is connected or the call
+/// fails - the caller then sends the prompt with no selection.
+pub async fn ide_get_selection() -> Option<Value> {
+    let peer = ide_peer_slot().lock().ok().and_then(|g| g.clone())?;
+    // Send an explicit empty arguments object: the tool takes no inputs, but the editor's SDK
+    // validates against `z.object({})` and rejects a missing `arguments` ("expected object,
+    // received undefined"). An empty map satisfies it and is correct for any strict server.
+    let res = peer
+        .call_tool(CallToolRequestParams::new("getSelection").with_arguments(Map::new()))
+        .await
+        .ok()?;
+    res.structured_content?.get("selection").cloned()
+}
+
 /// oxio's MCP client handler. On a `*_list_changed` notification it RE-DISCOVERS the
 /// server's tools/resources/prompts (via the notification's peer) and republishes them to
 /// the kernel's live registry through `on_change` - so a mid-session toolset change takes
@@ -122,6 +235,22 @@ impl ClientHandler for OxioClient {
         ctx: NotificationContext<RoleClient>,
     ) -> impl Future<Output = ()> + MaybeSendFuture + '_ {
         republish(self.server.clone(), self.on_change.clone(), ctx.peer)
+    }
+
+    /// An editor extension pushes `ide/contextUpdate` (open files + active selection) as a
+    /// custom notification. Store the latest params so the submit path can attach the current
+    /// selection. Any other custom notification is ignored.
+    fn on_custom_notification(
+        &self,
+        notification: rmcp::model::CustomNotification,
+        _ctx: NotificationContext<RoleClient>,
+    ) -> impl Future<Output = ()> + MaybeSendFuture + '_ {
+        if notification.method == "ide/contextUpdate" {
+            if let Ok(mut slot) = ide_context_slot().lock() {
+                *slot = notification.params;
+            }
+        }
+        std::future::ready(())
     }
 
     /// MCP elicitation: the server asks the user for input. Route the form message to the

@@ -1,0 +1,66 @@
+{
+  "name": "oxio",
+  "displayName": "oxio",
+  "description": "Sends the active editor selection to the oxio CLI running in the integrated terminal.",
+  "version": "0.1.6",
+  "publisher": "oxio",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "oxio.diff.accept",
+        "title": "oxio: Accept Diff",
+        "icon": "$(check)"
+      },
+      {
+        "command": "oxio.diff.cancel",
+        "title": "oxio: Reject Diff",
+        "icon": "$(close)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "oxio.diff.accept",
+          "when": "resourceScheme == oxio-diff",
+          "group": "navigation@1"
+        },
+        {
+          "command": "oxio.diff.cancel",
+          "when": "resourceScheme == oxio-diff",
+          "group": "navigation@2"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "oxio.diff.accept",
+        "key": "cmd+enter",
+        "when": "resourceScheme == oxio-diff"
+      },
+      {
+        "command": "oxio.diff.cancel",
+        "key": "escape",
+        "when": "resourceScheme == oxio-diff"
+      }
+    ]
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "express": "^4.21.2",
+    "zod": "^3.23.8"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/limkcreply/oxio"
+  }
+}

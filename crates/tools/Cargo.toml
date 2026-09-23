@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 oxio-core = { path = "../oxio-core" }
 memory = { path = "../memory" }  # local path dep: single source of the memory paths (project + global) for the memory tool
+session = { path = "../session" }  # transcript search backend for the recall tool
 async-trait.workspace = true
 serde_json.workspace = true
 ignore = "=0.4.23"  # ripgrep's gitignore walker; powers list_dir/grep/glob. exact pin

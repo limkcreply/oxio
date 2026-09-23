@@ -15,6 +15,25 @@ use crate::types::{
     ToolSpec, Usage,
 };
 
+/// Cap a tool's output for the activity display: the first `n` lines, each `⎿`-indented, with a
+/// `… (+N lines)` marker when more were hidden. Empty content yields an empty string (nothing to
+/// show). A blind check/cross hid failures - this makes the result and the error visible.
+fn cap_output(content: &str, n: usize) -> String {
+    if content.trim().is_empty() {
+        return String::new();
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let mut out: Vec<String> = lines
+        .iter()
+        .take(n)
+        .map(|l| format!("  \u{23BF} {l}"))
+        .collect();
+    if lines.len() > n {
+        out.push(format!("  \u{23BF} … (+{} lines)", lines.len() - n));
+    }
+    out.join("\n")
+}
+
 /// Fixed lifecycle points. Transformers run here (mutate), observers are notified
 /// here (read). This set is frozen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -251,6 +270,20 @@ impl Kernel {
                     text: format!("  {} {summary}", if ok { "\u{2713}" } else { "\u{2717}" }),
                 })
                 .await;
+                // Surface the tool's output (capped) so a result - and especially a failure - is
+                // visible, not a blind check/cross. Errors get more lines than a success preview.
+                let preview = cap_output(&content, if ok { 3 } else { 20 });
+                if !preview.is_empty() {
+                    sink.send(StreamEvent::Notice {
+                        level: if ok {
+                            NoticeLevel::Progress
+                        } else {
+                            NoticeLevel::Warn
+                        },
+                        text: preview,
+                    })
+                    .await;
+                }
                 let mut msg = Message::text(Role::Tool, content);
                 msg.tool_call_id = Some(call.id.clone());
                 state.messages.push(msg);

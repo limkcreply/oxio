@@ -325,6 +325,105 @@ pub fn list_sessions() -> Vec<SessionInfo> {
     infos.into_iter().rev().map(|(_, i)| i).collect()
 }
 
+/// One matching message from a past session, for the `recall` tool.
+#[derive(Debug, Clone)]
+pub struct RecallHit {
+    pub session_id: String,
+    pub role: String,
+    /// A trimmed one-line window of the message around the match.
+    pub excerpt: String,
+}
+
+/// Every transcript path recorded in the machine index, in file order (oldest first).
+fn indexed_paths() -> Vec<PathBuf> {
+    let Ok(body) = std::fs::read_to_string(session_index_path()) else {
+        return Vec::new();
+    };
+    body.lines()
+        .filter_map(|l| l.split_once('\t'))
+        .map(|(_, p)| PathBuf::from(p))
+        .collect()
+}
+
+/// Search past session transcripts for `query` (case-insensitive substring). This
+/// project's sessions come first (newest first), then any other sessions in the machine
+/// index. Returns up to `limit` matching user/assistant messages as excerpts. Read-only.
+pub fn search_sessions(query: &str, limit: usize) -> Vec<RecallHit> {
+    // This project's sessions first, then machine-wide, deduped by path so a project
+    // session is never scanned twice.
+    let mut seen = std::collections::HashSet::new();
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for info in list_sessions() {
+        if seen.insert(info.path.clone()) {
+            paths.push(info.path);
+        }
+    }
+    for p in indexed_paths().into_iter().rev() {
+        if p.exists() && seen.insert(p.clone()) {
+            paths.push(p);
+        }
+    }
+    search_paths(&paths, query, limit)
+}
+
+/// The core scan over an explicit, ordered list of transcript files. Split out from
+/// `search_sessions` so it is testable without touching the machine's session dirs.
+fn search_paths(paths: &[PathBuf], query: &str, limit: usize) -> Vec<RecallHit> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let mut hits = Vec::new();
+    for path in paths {
+        let id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_string();
+        for m in load_transcript(path) {
+            if !matches!(m.role, Role::User | Role::Assistant) {
+                continue;
+            }
+            let text = m.as_text();
+            if text.to_lowercase().contains(&q) {
+                hits.push(RecallHit {
+                    session_id: id.clone(),
+                    role: format!("{:?}", m.role).to_lowercase(),
+                    excerpt: excerpt(&text, &q),
+                });
+                if hits.len() >= limit {
+                    return hits;
+                }
+            }
+        }
+    }
+    hits
+}
+
+/// A whitespace-collapsed window of `text` around the first case-insensitive match of
+/// `q_lower`, with ellipses when trimmed. Operates on chars so it never splits a
+/// multi-byte boundary.
+fn excerpt(text: &str, q_lower: &str) -> String {
+    let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let chars: Vec<char> = flat.chars().collect();
+    let lower = flat.to_lowercase();
+    let Some(byte_pos) = lower.find(q_lower) else {
+        return chars.iter().take(160).collect();
+    };
+    let char_pos = lower[..byte_pos].chars().count();
+    let start = char_pos.saturating_sub(50);
+    let end = (char_pos + q_lower.chars().count() + 110).min(chars.len());
+    let mut s = String::new();
+    if start > 0 {
+        s.push('…');
+    }
+    s.extend(&chars[start..end]);
+    if end < chars.len() {
+        s.push('…');
+    }
+    s
+}
+
 #[async_trait]
 impl Transformer for SessionStore {
     async fn transform(&self, hook: Hook, state: &mut TurnState) -> Result<()> {
@@ -505,5 +604,39 @@ mod tests {
             abs,
             "absolute paths pass through unchanged"
         );
+    }
+
+    #[test]
+    fn recall_finds_a_message_and_skips_non_matches() {
+        let tag = now_ms();
+        let dir = std::env::temp_dir().join(format!("oxio-recall-{tag}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sess-recall.jsonl");
+        let rec = Record {
+            meta: None,
+            ts_ms: Some(1),
+            message: Some(Message::text(Role::User, "the meaning of pink is apple")),
+        };
+        std::fs::write(&path, format!("{}\n", serde_json::to_string(&rec).unwrap())).unwrap();
+
+        let hits = search_paths(std::slice::from_ref(&path), "pink", 10);
+        assert_eq!(hits.len(), 1, "the matching message is found");
+        assert_eq!(hits[0].session_id, "sess-recall");
+        assert_eq!(hits[0].role, "user");
+        assert!(hits[0].excerpt.to_lowercase().contains("pink"));
+
+        assert!(search_paths(std::slice::from_ref(&path), "banana", 10).is_empty());
+        assert!(search_paths(std::slice::from_ref(&path), "", 10).is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn excerpt_windows_around_match_without_panicking() {
+        let e = excerpt("café pink lady from the orchard", "pink");
+        assert!(e.to_lowercase().contains("pink"), "multibyte text is safe");
+        let long = format!("{}pink", "x ".repeat(200));
+        let e2 = excerpt(&long, "pink");
+        assert!(e2.contains('…'), "long text is ellipsized");
+        assert!(e2.to_lowercase().contains("pink"));
     }
 }

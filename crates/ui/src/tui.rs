@@ -197,10 +197,149 @@ fn set_terminal_title(title: &str) {
 /// composer. Matches the wire adapters' supported media types.
 const IMAGE_EXTS: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
 
-/// A paste at/above either bound collapses to a `[pasted #N +M lines]` chip instead of
-/// flooding the inline composer; below it, the text inserts inline as normal.
-const PASTE_COLLAPSE_LINES: usize = 6;
-const PASTE_COLLAPSE_BYTES: usize = 800;
+/// A paste at/above either bound collapses to a `[pasted #N +M lines]` chip; below it the text
+/// inserts inline.
+const PASTE_COLLAPSE_LINES: usize = 20;
+const PASTE_COLLAPSE_BYTES: usize = 2000;
+
+/// Window for the double-Esc "clear the composer" gesture: a second Esc within this of the first
+/// clears, so a single stray Esc never wipes a draft.
+const ESC_CLEAR_WINDOW: Duration = Duration::from_millis(1000);
+
+/// A slash command: name, argument hint, and one-line description. Kept in sync with `/help` and
+/// the command match.
+struct SlashCmd {
+    name: &'static str,
+    args: &'static str,
+    #[allow(dead_code)]
+    desc: &'static str,
+}
+
+const SLASH_CMDS: &[SlashCmd] = &[
+    SlashCmd {
+        name: "model",
+        args: "[model]",
+        desc: "Pick or manage the model and endpoints",
+    },
+    SlashCmd {
+        name: "mcp",
+        args: "[add|connect|remove]",
+        desc: "Manage MCP servers",
+    },
+    SlashCmd {
+        name: "think",
+        args: "on|off|auto",
+        desc: "Toggle model thinking/reasoning",
+    },
+    SlashCmd {
+        name: "remember",
+        args: "[global] <fact>",
+        desc: "Save a durable fact to memory",
+    },
+    SlashCmd {
+        name: "compact",
+        args: "",
+        desc: "Summarize the session to reclaim context",
+    },
+    SlashCmd {
+        name: "undo",
+        args: "",
+        desc: "Revert the last file write",
+    },
+    SlashCmd {
+        name: "open",
+        args: "[title]",
+        desc: "Reopen the last rendered page",
+    },
+    SlashCmd {
+        name: "suggest",
+        args: "",
+        desc: "Toggle ghost next-prompt suggestions",
+    },
+    SlashCmd {
+        name: "imageQ",
+        args: "low|medium|high",
+        desc: "Set generated-image quality",
+    },
+    SlashCmd {
+        name: "clear",
+        args: "",
+        desc: "Clear the screen and scrollback",
+    },
+    SlashCmd {
+        name: "help",
+        args: "",
+        desc: "List commands and keys",
+    },
+    SlashCmd {
+        name: "quit",
+        args: "",
+        desc: "Exit oxio",
+    },
+];
+
+/// The registered command whose name exactly equals the composer's first token (no leading '/'),
+/// or `None`. Used to highlight a valid command and show its argument hint.
+fn slash_exact(first_token: &str) -> Option<&'static SlashCmd> {
+    SLASH_CMDS.iter().find(|c| c.name == first_token)
+}
+
+/// Visual rows the input occupies when wrapped to `content_w` columns.
+fn composer_visual_rows(input: &str, content_w: usize) -> usize {
+    let w = content_w.max(1);
+    input
+        .split('\n')
+        .map(|l| l.chars().count().max(1).div_ceil(w))
+        .sum::<usize>()
+        .max(1)
+}
+
+/// Wrap the input into visual rows at the inner width, each prefixed ("❯ " on the first row, "  "
+/// after), and locate the caret: returns (rows, caret_row, caret_col) with caret_col including the
+/// 2-col prefix.
+fn wrap_composer(
+    input: &str,
+    cursor: usize,
+    inner_w: usize,
+    accent: Style,
+) -> (Vec<Line<'static>>, u16, u16) {
+    let content_w = inner_w.saturating_sub(2).max(1); // 2 cols for the prompt/indent
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut caret = (0u16, 2u16);
+    let mut base = 0usize; // byte offset at the start of the current logical line
+    for logical in input.split('\n') {
+        let chars: Vec<char> = logical.chars().collect();
+        let start_byte = base;
+        let end_byte = base + logical.len();
+        let caret_here = cursor >= start_byte && cursor <= end_byte;
+        let caret_off = if caret_here {
+            logical[..(cursor - start_byte).min(logical.len())]
+                .chars()
+                .count()
+        } else {
+            0
+        };
+        let mut i = 0usize;
+        loop {
+            let end = (i + content_w).min(chars.len());
+            let chunk: String = chars[i..end].iter().collect();
+            let prefix = if lines.is_empty() { "❯ " } else { "  " };
+            lines.push(Line::from(vec![
+                Span::styled(prefix, accent),
+                Span::raw(chunk),
+            ]));
+            if caret_here && caret_off >= i && (caret_off < end || end == chars.len()) {
+                caret = ((lines.len() - 1) as u16, 2 + (caret_off - i) as u16);
+            }
+            if end >= chars.len() {
+                break;
+            }
+            i = end;
+        }
+        base = end_byte + 1; // +1 for the '\n'
+    }
+    (lines, caret.0, caret.1)
+}
 
 /// Whether a paste is large enough to collapse to a chip (vs insert inline).
 fn should_collapse_paste(s: &str) -> bool {
@@ -511,7 +650,7 @@ fn connect_cmd(rest: &str, current: &str) -> (Vec<String>, ConnectAction) {
                     pc.model.clone().unwrap_or_default()
                 ));
             }
-            out.push(format!("  active now: {current} · /model (no args) → arrow-pick a model · /model <machine>/<model> to switch"));
+            out.push(format!("  active now: {current} · /model <endpoint> - switch · /model set <model> - pin a model"));
             out.push("  /model models - list served · /model ctx <tokens> - context window".into());
             out.push("  /model add <name> <url> [model] - add any endpoint · /model remove <name>".into());
             out.push("  /model cloud [vendor] - add a cloud provider · /model scan - find new + refresh".into());
@@ -661,8 +800,31 @@ fn connect_cmd(rest: &str, current: &str) -> (Vec<String>, ConnectAction) {
             }
             None => (vec!["no such endpoint - /model to list".into()], ConnectAction::None),
         },
+        // Pin the ACTIVE machine's model. A separate verb so a bare `/model <arg>` has ONE
+        // meaning (an endpoint name) and is never reinterpreted as a model.
+        Some("set") => match parts.next() {
+            None => (
+                vec!["usage: /model set <model> (pin a model on the active machine)".into()],
+                ConnectAction::None,
+            ),
+            Some(model) => match cfg.providers.get_mut(current) {
+                Some(pc) => {
+                    if pc.model.as_deref() == Some(model) {
+                        return (vec![format!("already on model '{model}'")], ConnectAction::None);
+                    }
+                    pc.model = Some(model.to_string());
+                    match config::save(&cfg) {
+                        Ok(()) => (vec![], ConnectAction::SwitchModel(model.to_string())),
+                        Err(e) => (vec![format!("connect: save failed: {e}")], ConnectAction::None),
+                    }
+                }
+                None => (vec![format!("no machine '{current}' in config - /model to list")], ConnectAction::None),
+            },
+        },
+        // A bare `/model <arg>` resolves ONLY as an endpoint name: one namespace, one result.
+        // No endpoint by that name is an error, never a silent model pin - that overload sent
+        // bogus model ids (an endpoint name, a typo) to the provider and 404'd.
         Some(sel) => match resolve_provider(&cfg, sel) {
-            // Arg is a MACHINE name → switch machine (persist new default + live swap).
             Some(n) if n == current => (vec![format!("already on machine '{n}'")], ConnectAction::None),
             Some(n) => {
                 cfg.defaults.primary = n.clone();
@@ -671,21 +833,12 @@ fn connect_cmd(rest: &str, current: &str) -> (Vec<String>, ConnectAction) {
                     Err(e) => (vec![format!("connect: save failed: {e}")], ConnectAction::None),
                 }
             }
-            // Arg is NOT a machine → treat it as a MODEL id on the active machine: pin it as that
-            // machine's model, persist, and hand it back for a live rebuild+swap.
-            None => match cfg.providers.get_mut(current) {
-                Some(pc) => {
-                    if pc.model.as_deref() == Some(sel) {
-                        return (vec![format!("already on model '{sel}'")], ConnectAction::None);
-                    }
-                    pc.model = Some(sel.to_string());
-                    match config::save(&cfg) {
-                        Ok(()) => (vec![], ConnectAction::SwitchModel(sel.to_string())),
-                        Err(e) => (vec![format!("connect: save failed: {e}")], ConnectAction::None),
-                    }
-                }
-                None => (vec![format!("no machine '{current}' in config - /model to list")], ConnectAction::None),
-            },
+            None => (
+                vec![format!(
+                    "no endpoint named '{sel}' - /model to list · /model set <model> to pin a model"
+                )],
+                ConnectAction::None,
+            ),
         },
     }
 }
@@ -895,12 +1048,26 @@ fn append_prompt_history(text: &str) {
     }
 }
 
+/// Record a submitted line for up/down recall (in-memory + persisted), skipping an immediate
+/// duplicate. EVERY submitted line goes here - model messages, slash commands, and queued
+/// type-ahead - so arrow-up recalls them all like a shell history, not just model messages.
+fn record_prompt(app: &mut App, text: &str) {
+    if app.history.last().map(String::as_str) != Some(text) {
+        app.history.push(text.to_string());
+        append_prompt_history(text);
+    }
+    app.hist_idx = None;
+}
+
 /// Run the oxio TUI. Falls back to the caller on setup failure.
 pub async fn run_tui(
     cfg: &Config,
     continue_session: bool,
     resume: Option<String>,
 ) -> anyhow::Result<()> {
+    // First run inside VS Code: offer to install the companion extension (consent, pre-TUI so
+    // the stdin prompt is safe). No-op elsewhere or once it is installed.
+    crate::ide::offer_extension_install();
     // Approval mode is config-driven. Interactive mode uses a TUI modal (not
     // stdin), routed to the event loop over this channel.
     let (appr_tx, appr_rx) = tokio::sync::mpsc::unbounded_channel::<ApprovalMsg>();
@@ -910,6 +1077,22 @@ pub async fn run_tui(
         _ => Arc::new(TuiApprover { tx: appr_tx }),
     };
     let approval_mode = approver.mode();
+    // Editor connected? Show write approvals on BOTH the editor diff and the CLI prompt at once;
+    // `appr_cancel` lets the editor's decision clear the CLI prompt. Otherwise the terminal alone.
+    let (appr_cancel_tx, appr_cancel_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    #[cfg(feature = "mcp")]
+    let approver: Arc<dyn Approver> = if crate::ide::ide_mcp_url().is_some() {
+        Arc::new(crate::IdeApprover {
+            inner: approver,
+            cancel: appr_cancel_tx,
+        })
+    } else {
+        // No editor: the cancel signal is never sent, but keep the binding used.
+        let _ = appr_cancel_tx;
+        approver
+    };
+    #[cfg(not(feature = "mcp"))]
+    let _ = appr_cancel_tx;
     // ask_user_question routes through this channel to the event loop (never a blocking
     // stdin read, which deadlocks against the TUI's raw-mode input).
     let (ask_tx, ask_rx) = tokio::sync::mpsc::unbounded_channel::<crate::AskRequest>();
@@ -1061,12 +1244,14 @@ pub async fn run_tui(
         // MCP servers connect in the BACKGROUND now (the input box is already usable) - show
         // a connecting line; each server's result lands live below as it resolves (mcp_rx).
         let _ = &ctl.mcp_status; // (populated only on the synchronous doctor/one-shot path)
-        if !cfg.mcp.is_empty() {
+                                 // Count every connection that will report a status line below: the configured servers plus
+                                 // the editor bridge when one is present. Derived, never hardcoded, so it tracks the real
+                                 // total as servers are added.
+        let ide_conn = cfg!(feature = "mcp") && crate::ide::ide_mcp_url().is_some();
+        let pending_conns = cfg.mcp.len() + usize::from(ide_conn);
+        if pending_conns > 0 {
             app.push(
-                format!(
-                    "  mcp    connecting to {} server(s) in the background…",
-                    cfg.mcp.len()
-                ),
+                format!("  mcp    connecting to {pending_conns} server(s) in the background…"),
                 App::dim(),
             );
         }
@@ -1100,6 +1285,7 @@ pub async fn run_tui(
         &compactor,
         &snapshots,
         appr_rx,
+        appr_cancel_rx,
         ask_rx,
         mcp_rx,
         vision_fb,
@@ -1181,6 +1367,7 @@ async fn event_loop(
     compactor: &Arc<context::Compactor>,
     snapshots: &Arc<SnapshotStore>,
     mut appr_rx: tokio::sync::mpsc::UnboundedReceiver<ApprovalMsg>,
+    mut appr_cancel_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
     mut ask_rx: tokio::sync::mpsc::UnboundedReceiver<crate::AskRequest>,
     mut mcp_rx: tokio::sync::mpsc::UnboundedReceiver<(String, Result<usize, String>)>,
     vision_fb: Option<(Arc<dyn oxio_core::Provider>, String, String)>,
@@ -1190,6 +1377,9 @@ async fn event_loop(
 ) -> anyhow::Result<()> {
     let mut keys = EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
+    // First press of the double-Esc composer-clear gesture (None = not armed).
+    let mut last_esc: Option<std::time::Instant> = None;
+    let mut vp_h = VIEWPORT_H;
     // Per-turn stream channel + cancel token (rebuilt each turn).
     let (_init_tx, mut sink_rx) = tokio::sync::mpsc::unbounded_channel::<StreamEvent>();
     let mut cancel: Option<CancellationToken> = None;
@@ -1213,22 +1403,28 @@ async fn event_loop(
     // attach any dropped images, spawn the turn, and return the new stream receiver +
     // cancel token. Called from Enter (idle) AND from the type-ahead queue flush.
     let start_turn = |app: &mut App,
-                      text: String|
+                      text: String,
+                      selection: Option<crate::ide::Selection>|
      -> (
         tokio::sync::mpsc::UnboundedReceiver<StreamEvent>,
         CancellationToken,
     ) {
-        if app.history.last() != Some(&text) {
-            app.history.push(text.clone());
-            append_prompt_history(&text); // persist for cross-session recall
-        }
-        app.hist_idx = None;
-        // Blank above the prompt (top space) and below it (bottom space).
+        record_prompt(app, &text); // in-memory + cross-session recall (resets hist_idx)
+                                   // Editor selection (VS Code, etc.): pulled at submit by the caller and passed in. Shown as
+                                   // a chip and added to the model context. The `❯ {text}` echo stays clean; only turn_text
+                                   // carries the code.
+                                   // Blank above the prompt (top space) and below it (bottom space).
         app.push(String::new(), Style::default());
         app.push(format!("❯ {text}"), user_hl());
+        if let Some(sel) = &selection {
+            app.push(format!("  {}", sel.chip()), App::dim());
+        }
         app.push(String::new(), Style::default());
         let mut images: Vec<String> = app.pending_images.drain(..).collect();
         let mut turn_text = text.clone();
+        if let Some(sel) = &selection {
+            turn_text = format!("{}{}", sel.context_block(), turn_text);
+        }
         // Expand collapsed-paste chips back to full text for the MODEL; the transcript echo
         // (`❯ {text}`) keeps the compact `[pasted #N +M lines]` chip, so the screen stays clean.
         for (marker, full) in app.pending_pastes.drain(..) {
@@ -1399,6 +1595,32 @@ async fn event_loop(
         // Skip the frame; the next tick redraws, and staying in the loop lets EventStream
         // absorb the stray DSR reply instead of it leaking to the shell after teardown.
         // (Propagating it did exactly that: aborted the turn + leaked `7;4R`.)
+        let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+        let content_w = (cols as usize).saturating_sub(4).max(1);
+        let visual_rows = match &app.pending_pick {
+            Some(p) => p.rows.len().clamp(1, 8),
+            None => composer_visual_rows(&app.input, content_w),
+        };
+        let want_h = (visual_rows as u16)
+            .saturating_add(4)
+            .clamp(5, rows.saturating_sub(1).max(5));
+        if want_h != vp_h {
+            let old_top = term.get_frame().area().top();
+            let _ = crossterm::execute!(
+                term.backend_mut(),
+                crossterm::cursor::MoveTo(0, old_top),
+                crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown),
+            );
+            if let Ok(t) = Terminal::with_options(
+                CrosstermBackend::new(std::io::stdout()),
+                TerminalOptions {
+                    viewport: Viewport::Inline(want_h),
+                },
+            ) {
+                *term = t;
+                vp_h = want_h;
+            }
+        }
         let _ = term.draw(|f| draw(f, app));
         if app.quit {
             return Ok(());
@@ -1413,37 +1635,45 @@ async fn event_loop(
                     focused = true;
                 } else if matches!(maybe_key.as_ref(), Some(Ok(Event::FocusLost))) {
                     focused = false;
-                } else if let Some(Ok(Event::Paste(s))) = maybe_key.as_ref() {
-                    if app.working.is_none() {
-                        // A dropped/pasted image path is attached to the next turn, not
-                        // inserted as text - this also keeps a leading-'/' path out of
-                        // the slash-command parser.
-                        if let Some(path) = dropped_image_path(s) {
-                            let name = std::path::Path::new(&path)
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or(&path)
-                                .to_string();
-                            app.pending_images.push(path);
-                            let marker = format!("[image: {name}] ");
-                            app.input.insert_str(app.cursor, &marker);
-                            app.cursor += marker.len();
+                } else if matches!(maybe_key.as_ref(), Some(Ok(Event::Resize(..)))) {
+                    vp_h = 0;
+                } else if let Some(Ok(Event::Paste(raw))) = maybe_key.as_ref() {
+                    // Terminals (VS Code's especially) deliver pasted line breaks as CR or CRLF,
+                    // not LF. Normalize to LF FIRST so the composer splits into real lines and the
+                    // collapse check counts them - without this a multiline paste renders as one
+                    // flattened, horizontally-scrolling line.
+                    let s = raw.replace("\r\n", "\n").replace('\r', "\n");
+                    let s = s.as_str();
+                    // Paste is allowed while a turn streams, exactly like typing - the text lands in
+                    // the composer and submits as type-ahead. Gating it on idle blocked composing a
+                    // queued message mid-turn.
+                    // A dropped/pasted image path is attached to the next turn, not inserted as
+                    // text - this also keeps a leading-'/' path out of the slash-command parser.
+                    if let Some(path) = dropped_image_path(s) {
+                        let name = std::path::Path::new(&path)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or(&path)
+                            .to_string();
+                        app.pending_images.push(path);
+                        let marker = format!("[image: {name}] ");
+                        app.input.insert_str(app.cursor, &marker);
+                        app.cursor += marker.len();
+                    } else {
+                        let lines = s.lines().count().max(1);
+                        if should_collapse_paste(s) {
+                            // Long paste → collapse to a chip: stash the
+                            // full text, show `[pasted #N +M lines]` in the composer, expand
+                            // at submit. Keeps the small inline composer from flooding.
+                            let n = app.pending_pastes.len() + 1;
+                            let marker = format!("[pasted #{n} +{lines} lines]");
+                            app.pending_pastes.push((marker.clone(), s.to_string()));
+                            let chip = format!("{marker} ");
+                            app.input.insert_str(app.cursor, &chip);
+                            app.cursor += chip.len();
                         } else {
-                            let lines = s.lines().count().max(1);
-                            if should_collapse_paste(s) {
-                                // Long paste → collapse to a chip: stash the
-                                // full text, show `[pasted #N +M lines]` in the composer, expand
-                                // at submit. Keeps the small inline composer from flooding.
-                                let n = app.pending_pastes.len() + 1;
-                                let marker = format!("[pasted #{n} +{lines} lines]");
-                                app.pending_pastes.push((marker.clone(), s.to_string()));
-                                let chip = format!("{marker} ");
-                                app.input.insert_str(app.cursor, &chip);
-                                app.cursor += chip.len();
-                            } else {
-                                app.input.insert_str(app.cursor, s);
-                                app.cursor += s.len();
-                            }
+                            app.input.insert_str(app.cursor, s);
+                            app.cursor += s.len();
                         }
                     }
                 } else if let Some(Ok(Event::Key(k))) = maybe_key {
@@ -1528,6 +1758,34 @@ async fn event_loop(
                             } else if app.ghost.is_some() {
                                 // A pending ghost? Esc dismisses it first (not the turn).
                                 app.ghost = None;
+                            } else if !app.input.is_empty() {
+                                // Composer has text (typed or pasted): DOUBLE Esc clears the whole
+                                // thing (chips + attached images too), so an unwanted prompt is
+                                // abandoned at once instead of backspaced char by char. The first
+                                // Esc arms it and hints; a second within the window clears.
+                                let now = std::time::Instant::now();
+                                let armed = last_esc
+                                    .map(|t| now.duration_since(t) < ESC_CLEAR_WINDOW)
+                                    .unwrap_or(false);
+                                if armed {
+                                    // Stash the abandoned draft into history BEFORE clearing, so
+                                    // ↑ brings it back - a cleared paste/prompt is recoverable,
+                                    // never lost (matches Claude). Expand any paste chips so the
+                                    // recalled text is the full original, not the `[pasted]` marker.
+                                    let mut draft = std::mem::take(&mut app.input);
+                                    for (marker, full) in &app.pending_pastes {
+                                        draft = draft.replace(marker, full);
+                                    }
+                                    record_prompt(app, draft.trim());
+                                    app.cursor = 0;
+                                    app.draft = None;
+                                    app.pending_pastes.clear();
+                                    app.pending_images.clear();
+                                    app.ghost = None;
+                                    last_esc = None;
+                                } else {
+                                    last_esc = Some(now);
+                                }
                             } else if let Some(c) = &cancel {
                                 c.cancel();
                             }
@@ -1566,6 +1824,7 @@ async fn event_loop(
                             // auto-send when it finishes. Up
                             // recalls it. Slash commands still run immediately, mid-turn.
                             if app.working.is_some() && !is_slash_cmd {
+                                // Recorded on flush by start_turn, not here, to avoid a double entry.
                                 app.queued.push_back(text);
                                 app.input.clear();
                                 app.cursor = 0;
@@ -1573,9 +1832,9 @@ async fn event_loop(
                                 continue;
                             }
                             if let Some(cmd) = text.strip_prefix('/').filter(|_| is_slash_cmd) {
+                                record_prompt(app, &text); // slash commands recall too (resets hist_idx)
                                 app.input.clear();
                                 app.cursor = 0;
-                                app.hist_idx = None;
                                 match cmd.split_whitespace().next().unwrap_or("") {
                                     "quit" | "q" | "exit" => app.quit = true,
                                     "clear" => {
@@ -1797,17 +2056,28 @@ async fn event_loop(
                                         let rest = cmd.split_once(char::is_whitespace).map(|(_, r)| r.trim()).unwrap_or("");
                                         let mut parts = rest.split_whitespace();
                                         match parts.next() {
-                                            None | Some("list") => match config::load() {
-                                                Ok(cfg) if !cfg.mcp.is_empty() => {
-                                                    app.push("mcp servers:".to_string(), App::dim());
+                                            None | Some("list") => {
+                                                #[cfg(feature = "mcp")]
+                                                let ide_ver = mcp::ide_version();
+                                                #[cfg(not(feature = "mcp"))]
+                                                let ide_ver: Option<String> = None;
+                                                // The editor bridge is an MCP connection too: show its LIVE version so the
+                                                // user can confirm which extension build is running (a reload can lag the
+                                                // installed version), or that no editor is connected.
+                                                let ide_line = match ide_ver {
+                                                    Some(v) => format!("  ide  editor bridge · oxio-ide {v} ● connected"),
+                                                    None => "  ide  editor bridge ○ not connected (run oxio from the editor's terminal)".to_string(),
+                                                };
+                                                app.push("mcp servers:".to_string(), App::dim());
+                                                if let Ok(cfg) = config::load() {
                                                     for (n, sc) in &cfg.mcp {
                                                         let target = sc.url.clone().or_else(|| sc.command.clone()).unwrap_or_default();
                                                         app.push(format!("  {n}  {target}"), App::dim());
                                                     }
-                                                    app.push("  /mcp add <name> <url | command…> · /mcp connect <name> · /mcp remove <name>".to_string(), App::dim());
                                                 }
-                                                _ => app.push("no mcp servers - /mcp add <name> <url | command…>".to_string(), App::dim()),
-                                            },
+                                                app.push(ide_line, App::dim());
+                                                app.push("  /mcp add <name> <url | command…> · /mcp connect <name> · /mcp remove <name>".to_string(), App::dim());
+                                            }
                                             Some("add") => {
                                                 let name = parts.next().unwrap_or("").to_string();
                                                 let spec: Vec<String> = parts.map(|s| s.to_string()).collect();
@@ -1954,7 +2224,8 @@ async fn event_loop(
                             }
                             app.input.clear();
                             app.cursor = 0;
-                            let (rx, tok) = start_turn(app, text);
+                            let sel = crate::ide::fetch_selection().await;
+                            let (rx, tok) = start_turn(app, text, sel);
                             sink_rx = rx;
                             cancel = Some(tok);
                         }
@@ -2085,7 +2356,10 @@ async fn event_loop(
                         } else {
                             App::dim()
                         };
-                        app.push(text, style);
+                        // A notice may carry several lines (capped tool output) - each to scrollback.
+                        for line in text.split('\n') {
+                            app.push(line.to_string(), style);
+                        }
                     }
                     StreamEvent::Done { usage, .. } => {
                         // A model STEP finished: bank usage and commit the streamed text
@@ -2115,7 +2389,8 @@ async fn event_loop(
                 }
                 // Type-ahead: auto-send the next message queued during the turn.
                 if let Some(next) = app.queued.pop_front() {
-                    let (rx, tok) = start_turn(app, next);
+                    let sel = crate::ide::fetch_selection().await;
+                    let (rx, tok) = start_turn(app, next, sel);
                     sink_rx = rx;
                     cancel = Some(tok);
                 } else if app.suggest {
@@ -2190,6 +2465,14 @@ async fn event_loop(
                     Err(e) => app.push(format!("  mcp    {name}  ○ offline - {}", e.lines().next().unwrap_or("unreachable")), App::dim()),
                 }
             }
+            // The editor diff answered a write approval first: drop the still-open CLI prompt so it
+            // does not linger waiting for a keypress that is no longer needed.
+            Some(()) = appr_cancel_rx.recv() => {
+                if app.pending.take().is_some() {
+                    app.pending_summary = String::new();
+                    app.push("  ⎿ answered in editor".to_string(), App::dim());
+                }
+            }
         }
     }
 }
@@ -2198,10 +2481,9 @@ async fn event_loop(
 /// History is NOT drawn here - it lives in the terminal's native scrollback (flushed
 /// via `insert_before` in the event loop), so native scroll + selection work.
 fn draw(f: &mut ratatui::Frame, app: &App) {
-    let area = f.area(); // the inline viewport (VIEWPORT_H rows)
-                         // Composer grows with line count, bounded by the viewport (indicator + status take
-                         // one row each). Fixed viewport height is a known limit; dynamic height is a follow-up.
-    let input_rows = app.input.split('\n').count().max(1) as u16;
+    let area = f.area(); // the inline viewport (height tracked to content by the event loop)
+    let content_w = (area.width as usize).saturating_sub(4).max(1);
+    let input_rows = composer_visual_rows(&app.input, content_w) as u16;
     let max_input = area.height.saturating_sub(2).max(3);
     // While the connect picker is up, the middle region becomes the list panel (windowed),
     // sized to the visible window + borders, bounded by the viewport.
@@ -2277,29 +2559,57 @@ fn draw(f: &mut ratatui::Frame, app: &App) {
     // Framed composer; empty shows a dim placeholder. First line gets the "❯ " prompt,
     // continuation lines a matching 2-space indent.
     let accent = theme();
-    let input_lines: Vec<Line> = if app.input.is_empty() {
-        if let Some(g) = &app.ghost {
+    let inner_w = (area.width as usize).saturating_sub(2); // inside the composer borders
+    let (input_lines, caret_row, caret_col): (Vec<Line>, u16, u16) = if app.input.is_empty() {
+        let row = if let Some(g) = &app.ghost {
             // Ghost next-prompt suggestion: dimmed after the prompt, with a Tab hint.
-            vec![Line::from(vec![
+            Line::from(vec![
                 Span::styled("❯ ", accent),
                 Span::styled(g.clone(), App::dim()),
                 Span::styled("  (Tab)", Style::default().fg(Color::DarkGray)),
-            ])]
+            ])
         } else {
-            vec![Line::from(vec![
+            Line::from(vec![
                 Span::styled("❯ ", accent),
                 Span::styled("send a message…", App::dim()),
-            ])]
-        }
+            ])
+        };
+        (vec![row], 0, 2)
     } else {
-        app.input
-            .split('\n')
-            .enumerate()
-            .map(|(i, l)| {
-                let prefix = if i == 0 { "❯ " } else { "  " };
-                Line::from(vec![Span::styled(prefix, accent), Span::raw(l.to_string())])
-            })
-            .collect()
+        // Wrap to the width so nothing overflows off the right edge, and follow the caret.
+        let (mut lines, cr, cc) = wrap_composer(&app.input, app.cursor, inner_w, accent);
+        // First row only: a valid `/command` gets its token painted yellow (it is real) plus a dim
+        // argument hint while no argument is typed (e.g. `/model [model]`). Short lines only, so the
+        // override never fights the wrap.
+        let first = app.input.split('\n').next().unwrap_or("");
+        if first.chars().count() <= content_w {
+            if let Some(cmd) = first
+                .strip_prefix('/')
+                .map(|r| r.split_whitespace().next().unwrap_or(""))
+                .filter(|t| !t.is_empty())
+                .and_then(slash_exact)
+            {
+                let token = format!("/{}", cmd.name);
+                let rest = &first[token.len().min(first.len())..];
+                let mut spans = vec![
+                    Span::styled("❯ ", accent),
+                    Span::styled(
+                        token,
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(rest.to_string()),
+                ];
+                if rest.trim().is_empty() && !cmd.args.is_empty() {
+                    spans.push(Span::styled(format!(" {}", cmd.args), App::dim()));
+                }
+                if let Some(first_line) = lines.first_mut() {
+                    *first_line = Line::from(spans);
+                }
+            }
+        }
+        (lines, cr, cc)
     };
     let input_area = chunks[1];
     if let Some(p) = &app.pending_pick {
@@ -2351,18 +2661,18 @@ fn draw(f: &mut ratatui::Frame, app: &App) {
             input_area,
         );
     } else {
+        let inner_h = input_area.height.saturating_sub(2);
+        let scroll = caret_row.saturating_sub(inner_h.saturating_sub(1));
         f.render_widget(
-            Paragraph::new(input_lines).block(Block::default().borders(Borders::ALL)),
+            Paragraph::new(input_lines)
+                .scroll((scroll, 0))
+                .block(Block::default().borders(Borders::ALL)),
             input_area,
         );
-        // Cursor: row = newlines before the caret; col = chars in the current line before it.
-        let before = &app.input[..app.cursor.min(app.input.len())];
-        let row = before.matches('\n').count() as u16;
-        let col = before.rsplit('\n').next().unwrap_or("").chars().count() as u16;
+        // Caret (row/col already in wrapped space; col includes the 2-col prompt).
         let max_x = input_area.x + input_area.width.saturating_sub(2);
-        let max_y = input_area.y + input_area.height.saturating_sub(2);
-        let cx = (input_area.x + 1 + 2 + col).min(max_x);
-        let cy = (input_area.y + 1 + row).min(max_y);
+        let cx = (input_area.x + 1 + caret_col).min(max_x);
+        let cy = input_area.y + 1 + caret_row.saturating_sub(scroll);
         f.set_cursor_position((cx, cy));
     }
 
@@ -2598,12 +2908,12 @@ mod tests {
 
     #[test]
     fn long_paste_collapses_short_paste_inlines() {
-        // Short paste (few lines, small) inserts inline - no chip.
+        // Short/moderate paste inserts inline (the composer grows and scrolls to review) - no chip.
         assert!(!should_collapse_paste("one line"));
-        assert!(!should_collapse_paste("a\nb\nc"));
-        // Long paste (>= 6 lines OR >= 800 bytes) collapses to a chip.
-        assert!(should_collapse_paste("a\nb\nc\nd\ne\nf"));
-        assert!(should_collapse_paste(&"x".repeat(900)));
+        assert!(!should_collapse_paste("a\nb\nc\nd\ne\nf"));
+        // Genuinely large paste (>= 20 lines OR >= 2000 bytes) collapses to a chip.
+        assert!(should_collapse_paste(&"a\n".repeat(20)));
+        assert!(should_collapse_paste(&"x".repeat(2000)));
     }
 
     #[test]

@@ -1508,6 +1508,37 @@ mod patch_matcher_ab {
     }
 }
 
+/// Compute `(path, before, after)` the patch would produce for its first Add/Update file, WITHOUT
+/// writing - for the editor diff shown at approval. Uses the same `find_seq` + `splice` as
+/// `apply_ops`, so the preview matches what will be written. `None` when there is no previewable
+/// file op or a hunk cannot be located (the caller then falls back to the terminal prompt).
+pub fn patch_preview(patch: &str) -> Option<(String, String, String)> {
+    for op in parse_patch(patch).ok()? {
+        match op {
+            PatchOp::Add { path, contents } => return Some((path, String::new(), contents)),
+            PatchOp::Update { path, hunks, .. } => {
+                let original = std::fs::read_to_string(&path).ok()?;
+                let had_trailing_nl = original.ends_with('\n');
+                let mut lines: Vec<String> = original.lines().map(|s| s.to_string()).collect();
+                for h in &hunks {
+                    if h.before.is_empty() {
+                        return None;
+                    }
+                    let (start, end, _tier) = find_seq(&lines, &h.before).ok()?;
+                    lines.splice(start..end, h.after.iter().cloned());
+                }
+                let mut after = lines.join("\n");
+                if had_trailing_nl {
+                    after.push('\n');
+                }
+                return Some((path, original, after));
+            }
+            PatchOp::Delete { .. } => continue,
+        }
+    }
+    None
+}
+
 fn apply_ops(ops: Vec<PatchOp>) -> std::result::Result<String, String> {
     let mut summary = Vec::new();
     for op in ops {
@@ -2607,6 +2638,58 @@ and decisions, not transient chatter."
     }
 }
 
+/// Search PAST conversation sessions for a query. `kind()=Read` (default): it only reads
+/// oxio's own transcript files. Distinct from `memory` (saved facts) and from resuming a
+/// whole session.
+pub struct Recall;
+
+#[async_trait]
+impl Tool for Recall {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "recall".into(),
+            description: "Search PAST conversation sessions for a query (case-insensitive) and return \
+matching excerpts tagged with their session id. This project's sessions first, then machine-wide. Use to \
+find what was said or decided in an earlier session. Read-only. Distinct from `memory` (saved facts) and \
+from resuming a whole session by id."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "text to search for across past sessions" },
+                    "limit": { "type": "integer", "description": "max excerpts to return (default 10, max 50)" }
+                },
+                "required": ["query"]
+            }),
+        }
+    }
+    fn summarize(&self, input: &Value) -> String {
+        match input.get("query").and_then(|v| v.as_str()) {
+            Some(q) => format!("Recall past sessions: {q}"),
+            None => "recall".into(),
+        }
+    }
+    async fn call(&self, input: Value, _ctx: &Ctx) -> Result<ToolOutput> {
+        let query = arg_str(&input, "query", "recall")?;
+        let limit = input
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(10)
+            .clamp(1, 50) as usize;
+        let hits = session::search_sessions(query, limit);
+        if hits.is_empty() {
+            return Ok(ToolOutput::ok(format!(
+                "no past session mentions '{query}'"
+            )));
+        }
+        let mut out = String::new();
+        for h in &hits {
+            out.push_str(&format!("[{}] {}: {}\n", h.session_id, h.role, h.excerpt));
+        }
+        Ok(ToolOutput::ok(out.trim_end().to_string()))
+    }
+}
+
 /// Keyword search over the built-in tool catalog (dynamic discovery). Today all
 /// tools are advertised each turn, so this is a convenience; it becomes
 /// load-bearing only with deferred advertisement at scale (many MCP tools). The
@@ -3226,6 +3309,7 @@ pub fn builtin() -> Vec<Arc<dyn Tool>> {
         Arc::new(UpdatePlan::new()),
         Arc::new(WebSearch),
         Arc::new(Memory),
+        Arc::new(Recall),
         Arc::new(TaskList {
             tasks: tasks.clone(),
         }),
@@ -3828,6 +3912,37 @@ mod tests {
             .unwrap();
         assert!(!out.is_error, "got {:?}", out.content);
         assert!(!g.exists(), "deleted");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn patch_preview_computes_after_without_writing() {
+        let d = tmp_dir("pv");
+        let f = d.join("app.py");
+        std::fs::write(&f, "print(\"Hi\")\nx = 1\n").unwrap();
+        let f_str = f.to_string_lossy().to_string();
+        let upd = format!("*** Begin Patch\n*** Update File: {f_str}\n@@\n-print(\"Hi\")\n+print(\"Hello\")\n x = 1\n*** End Patch");
+        let (path, before, after) = patch_preview(&upd).expect("previewable update");
+        assert_eq!(path, f_str);
+        assert_eq!(before, "print(\"Hi\")\nx = 1\n");
+        assert_eq!(
+            after, "print(\"Hello\")\nx = 1\n",
+            "after matches what apply would write"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&f).unwrap(),
+            "print(\"Hi\")\nx = 1\n",
+            "preview never touches the file"
+        );
+
+        let g = d.join("new.py");
+        let add = format!(
+            "*** Begin Patch\n*** Add File: {}\n+a = 1\n*** End Patch",
+            g.to_string_lossy()
+        );
+        let (_p, before, after) = patch_preview(&add).expect("previewable add");
+        assert_eq!(before, "");
+        assert_eq!(after, "a = 1\n");
         let _ = std::fs::remove_dir_all(&d);
     }
 

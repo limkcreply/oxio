@@ -20,6 +20,9 @@ mod tui;
 #[cfg(feature = "tui")]
 pub use tui::run_tui;
 
+/// Editor selection bridge (VS Code and any editor extension that serves the selection).
+pub mod ide;
+
 /// Interactive entry point: the ratatui TUI when built with `tui` (the default),
 /// otherwise the legacy line REPL. `main` calls this and stays feature-agnostic.
 pub async fn run_interactive(
@@ -782,6 +785,63 @@ async fn connect_mcp_deferred(
     }
 }
 
+/// Shows a file-write approval on BOTH surfaces at once when an editor is connected: the editor's
+/// left/right diff AND the inner approver's CLI y/N prompt at once.
+/// Whichever the user answers first wins and the other is dismissed - the editor tick clears the
+/// CLI prompt (via `cancel`), a CLI key closes the editor diff (via `ide_close_diff`). Anything
+/// without clean before/after content, and any session with no editor, is gated by the inner
+/// (terminal) approver alone - the write is never silently allowed.
+#[cfg(feature = "mcp")]
+struct IdeApprover {
+    inner: Arc<dyn Approver>,
+    /// Signals the UI loop to drop its pending CLI prompt when the editor answered first.
+    cancel: tokio::sync::mpsc::UnboundedSender<()>,
+}
+
+#[cfg(feature = "mcp")]
+#[async_trait]
+impl Approver for IdeApprover {
+    async fn approve(&self, req: &ApprovalRequest) -> Decision {
+        // Resolve the proposed (file, after-content) to diff: write_file carries them directly;
+        // apply_patch is previewed to the content it would produce. The editor only shows the diff
+        // and returns the decision - oxio's tool does the actual write after approval.
+        let target = if let (Some(f), Some(c)) = (
+            req.input.get("path").and_then(|v| v.as_str()),
+            req.input.get("content").and_then(|v| v.as_str()),
+        ) {
+            Some((f.to_string(), c.to_string()))
+        } else if let Some(patch) = req.input.get("patch").and_then(|v| v.as_str()) {
+            tools::patch_preview(patch).map(|(p, _before, after)| (p, after))
+        } else {
+            None
+        };
+        let Some((file, content)) = target else {
+            return self.inner.approve(req).await;
+        };
+        // The editor arm yields `Some(accepted)` on a decision; on an editor error it parks forever
+        // so the race resolves purely on the CLI side (no double prompt, no lost gate).
+        let editor = async {
+            match mcp::ide_open_diff(&file, &content).await {
+                Ok(accepted) => Some(accepted),
+                Err(_) => std::future::pending::<Option<bool>>().await,
+            }
+        };
+        tokio::select! {
+            Some(accepted) = editor => {
+                let _ = self.cancel.send(());
+                if accepted { Decision::Once } else { Decision::Deny }
+            }
+            decision = self.inner.approve(req) => {
+                mcp::ide_close_diff().await;
+                decision
+            }
+        }
+    }
+    fn mode(&self) -> &'static str {
+        self.inner.mode()
+    }
+}
+
 pub async fn build_kernel(
     cfg: &Config,
     approver: Arc<dyn Approver>,
@@ -910,6 +970,7 @@ pub async fn build_kernel(
             .map(|(name, sc)| (name.clone(), mcp_wire_cfg(name, sc)))
             .collect();
 
+        let ide_status_tx = mcp_status_tx.clone();
         if let Some(tx) = mcp_status_tx {
             // DEFERRED (TUI): connect in the background so the input box renders immediately,
             // instead of blocking on every handshake. Tools hot-add to the live registry as
@@ -955,6 +1016,26 @@ pub async fn build_kernel(
                     Err(e) => mcp_status.push((name.clone(), Err(e))),
                 }
             }
+        }
+        // Editor bridge: when an editor extension is present (OXIO_IDE_PORT set), connect to its
+        // loopback MCP server in the background. Its `ide/contextUpdate` notifications flow to the
+        // shared store (read at submit for the selection chip); its tools stay on the anchored
+        // service and are NOT registered as model tools.
+        if let Some(url) = crate::ide::ide_mcp_url() {
+            tokio::spawn(async move {
+                // Surface the editor bridge in the mcp status list, so a silent connect failure is
+                // visible. The connect returns the extension's LIVE version - show it in the label
+                // so the user sees which build is running. `getSelection`/`openDiff` are called
+                // directly (not model tools), so a successful connect reports 0 listed tools.
+                let connected = mcp::connect_ide(&url).await;
+                let label = match &connected {
+                    Ok(Some(v)) => format!("ide · oxio-ide {v}"),
+                    _ => "ide".to_string(),
+                };
+                if let Some(tx) = ide_status_tx {
+                    let _ = tx.send((label, connected.map(|_| 0usize)));
+                }
+            });
         }
         mcp_conn = Some(McpConnector {
             tools_handle: reg.tools_handle(),
